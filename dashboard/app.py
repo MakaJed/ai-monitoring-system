@@ -641,25 +641,24 @@ def initialize_camera_if_available() -> None:
     # Check available camera libraries
     print(f"[Camera] Available libraries: PiCamera={PiCamera is not None}, Picamera2={Picamera2 is not None}, OpenCV={cv2 is not None}")
     
-    # Don't reset existing camera if it's already working
+    # Simple check: if camera already working, don't reinitialize
     with camera_lock:
         existing_picam2 = picam2
         existing_provider = camera_provider
-    # If camera is already working, don't reinitialize
     if existing_provider == "picamera2" and existing_picam2 is not None:
         try:
-            # Quick test to see if camera is still working
+            # Quick test - just try one capture
             test = existing_picam2.capture_array()
-            if test is not None and getattr(test, "size", 0) > 0:
+            if test is not None and test.size > 0:
                 print("[Camera] Camera already initialized and working, skipping reinit")
                 return
         except Exception:
             # Camera exists but not working, continue with reinit
             pass
     
+    # Reset camera state before reinitializing
     with camera_lock:
         camera_capture = None
-        # Only reset if we're going to create a new one
         if picam2 is not None:
             try:
                 picam2.stop()
@@ -709,79 +708,39 @@ def initialize_camera_if_available() -> None:
         print("[Camera] Legacy PiCamera not available (module not imported)")
 
     # --- Try Picamera2 (if available, for libcamera) ---
+    # Use the simple approach that worked before - just specify size, no format
     if Picamera2 is not None:
         try:
             print("[Camera] Trying Picamera2 (libcamera backend)...")
-            print("[Camera] Note: Since rpicam-still works, Picamera2 should work too")
             cam = Picamera2()
-            # Use a configuration that works well with libcamera
-            # Try different configurations
-            # Prefer RGB888 so downstream conversion is simple; avoid YUV-only configs
-            configs_to_try = [
-                {"size": (STREAM_WIDTH, STREAM_HEIGHT), "format": "RGB888"},
-                {"size": (640, 480), "format": "RGB888"},
-                {"size": (640, 480)},  # Let libcamera choose format if RGB fails
-            ]
+            # Simple config like the old working code - just size, let libcamera choose format
+            preview_config = cam.create_preview_configuration(main={"size": (STREAM_WIDTH, STREAM_HEIGHT)})
+            cam.configure(preview_config)
+            cam.start()
+            time.sleep(1.0)  # Brief stabilization
             
-            for cfg_idx, cfg_main in enumerate(configs_to_try):
-                try:
-                    print(f"[Camera] Trying Picamera2 config {cfg_idx+1}/{len(configs_to_try)}: {cfg_main}")
-                    config = cam.create_preview_configuration(main=cfg_main)
-                    cam.configure(config)
-                    cam.start()
-                    time.sleep(2.5)  # Give camera more time to stabilize with libcamera
-                    
-                    # Test capture with retry
-                    test_frame = None
-                    for retry in range(8):
-                        try:
-                            test_frame = cam.capture_array()
-                            if test_frame is not None and test_frame.size > 0:
-                                # Verify frame has content
-                                frame_mean = test_frame.mean()
-                                if frame_mean > 1.0:  # Not all black
-                                    print(f"[Camera] Test frame mean: {frame_mean:.1f}")
-                                    break
-                            time.sleep(0.3)
-                        except Exception as e:
-                            if retry == 7:
-                                raise e
-                            if retry % 2 == 0:
-                                print(f"[Camera] Capture attempt {retry+1}/8 failed: {e}")
-                            time.sleep(0.5)
-                    
-                    if test_frame is not None and getattr(test_frame, "size", 0) > 0 and test_frame.mean() > 1.0:
-                        with camera_lock:
-                            picam2 = cam
-                            camera_provider = "picamera2"
-                        print(f"[Camera] OK Picamera2 initialized successfully (test frame: {test_frame.shape}, config: {cfg_idx+1})")
-                        return
-                    else:
-                        cam.stop()
-                        if cfg_idx < len(configs_to_try) - 1:
-                            print(f"[Camera] Config {cfg_idx+1} failed, trying next...")
-                            continue
-                        else:
-                            cam.close()
-                            print("[Camera] FAIL Picamera2 test capture failed - all configs tried")
-                except Exception as cfg_err:
-                    try:
-                        cam.stop()
-                    except Exception:
-                        pass
-                    if cfg_idx < len(configs_to_try) - 1:
-                        print(f"[Camera] Config {cfg_idx+1} error: {cfg_err}, trying next...")
-                        time.sleep(1.0)
-                        continue
-                    else:
-                        raise cfg_err
+            # Simple test - just try to capture once
+            try:
+                test_frame = cam.capture_array()
+                if test_frame is not None and test_frame.size > 0:
+                    with camera_lock:
+                        picam2 = cam
+                        camera_provider = "picamera2"
+                    print(f"[Camera] OK Picamera2 initialized successfully (test frame shape: {test_frame.shape})")
+                    return
+                else:
+                    cam.stop()
+                    cam.close()
+                    print("[Camera] FAIL Picamera2 test capture returned empty frame")
+            except Exception as test_err:
+                cam.stop()
+                cam.close()
+                print(f"[Camera] FAIL Picamera2 test capture failed: {test_err}")
         except ImportError as e:
             print(f"[Camera] Picamera2 import failed: {e}")
             print("[Camera] Try: sudo apt install python3-picamera2")
         except Exception as e:
             print(f"[Camera] FAIL Picamera2 init failed: {e}")
-            print("[Camera] Note: rpicam-still works, so libcamera is available")
-            print("[Camera] Picamera2 might need different configuration or permissions")
             import traceback
             traceback.print_exc()
 
@@ -1006,44 +965,25 @@ def read_camera_frame() -> tuple[bool, "np.ndarray | None"]:
         with camera_lock:
             cam = picam2
         if cam is None:
-            print("[Camera] read_camera_frame: picam2 is None, attempting reinit...")
-            # Try to reinitialize if camera object is lost
-            try:
-                initialize_camera_if_available()
-            except Exception as e:
-                print(f"[Camera] read_camera_frame reinit failed: {e}")
-            with camera_lock:
-                cam = picam2
-            if cam is None:
-                return False, None
+            return False, None
         try:
-            rgb = cam.capture_array()
-            # If frame already RGB
-            if hasattr(rgb, "ndim") and rgb.ndim == 3 and rgb.shape[2] == 3:
-                frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            else:
-                # Handle common YUV420 planar case (height*3/2 x width)
-                try:
-                    h_like, w_like = rgb.shape[0], rgb.shape[1] if hasattr(rgb, "shape") and len(rgb.shape) >= 2 else (0, 0)
-                except Exception:
-                    h_like, w_like = 0, 0
-                frame = None
-                if h_like and w_like and (h_like * 2) % 3 == 0:
-                    try:
-                        frame = cv2.cvtColor(rgb, cv2.COLOR_YUV2BGR_I420)
-                    except Exception:
-                        frame = None
-                if frame is None:
-                    # Last resort: try treating as already BGR
-                    try:
-                        frame = rgb
-                    except Exception:
-                        return False, None
+            # Simple approach like old code - just capture_array()
+            frame = cam.capture_array()
+            if frame is None or frame.size == 0:
+                return False, None
+            
+            # Convert to BGR if needed (Picamera2 usually returns RGB)
+            if hasattr(frame, "ndim") and frame.ndim == 3:
+                if frame.shape[2] == 3:
+                    # Assume RGB, convert to BGR for OpenCV
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            
+            # Resize if needed
             if frame.shape[1] != STREAM_WIDTH or frame.shape[0] != STREAM_HEIGHT:
                 frame = cv2.resize(frame, (STREAM_WIDTH, STREAM_HEIGHT))
             return True, frame
         except Exception as e:
-            # Log error occasionally to debug camera read failures
+            # Log error occasionally
             import time
             if not hasattr(read_camera_frame, '_last_error_log') or time.time() - read_camera_frame._last_error_log > 10:
                 print(f"[Camera] read_camera_frame error: {e}")
@@ -1966,40 +1906,14 @@ def camera_feed():
     global camera_provider, picam2
     with camera_lock:
         provider = camera_provider
-        cam_obj = picam2
-    # If provider says picamera2 but camera object is None, reinitialize
-    if provider == "picamera2" and cam_obj is None:
-        print("[Camera] camera_feed: provider is picamera2 but picam2 is None, reinitializing...")
-        try:
-            initialize_camera_if_available()
-        except Exception as e:
-            print(f"[Camera] camera_feed reinit failed: {e}")
-        with camera_lock:
-            provider = camera_provider
     if provider not in ('cv2', 'picamera2', 'picamera_legacy'):
-        # Attempt reinitialization on-demand
+        # Try to initialize if not already done
         try:
             initialize_camera_if_available()
         except Exception:
             pass
         with camera_lock:
             provider = camera_provider
-        if provider not in ('cv2', 'picamera2', 'picamera_legacy') and Picamera2 is not None:
-            # Quick Picamera2 fallback using RGB888 as in the working sample
-            try:
-                cam = Picamera2()
-                config = cam.create_preview_configuration(main={"size": (STREAM_WIDTH, STREAM_HEIGHT), "format": "RGB888"})
-                cam.configure(config)
-                cam.start()
-                time.sleep(1.0)
-                test = cam.capture_array()
-                if test is not None and getattr(test, "size", 0) > 0:
-                    with camera_lock:
-                        picam2 = cam
-                        camera_provider = "picamera2"
-                    provider = camera_provider
-            except Exception:
-                pass
     if provider not in ('cv2', 'picamera2', 'picamera_legacy'):
         return jsonify({"error": "cam offline"}), 503
     return Response(stream_with_context(generate_camera_stream()),
