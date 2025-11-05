@@ -415,7 +415,7 @@ def initialize_symptoms_detector():
 
 
 def run_symptoms_on_roi(roi_bgr: "np.ndarray") -> list:
-    SYM_CONF = float(os.getenv("SYMPTOMS_CONF", "0.35"))
+    SYM_CONF = float(os.getenv("SYMPTOMS_CONF", "0.6"))  # Increased to 0.6 to significantly reduce false positives
     if sym_interpreter is None or sym_input_shape is None or cv2 is None or np is None:
         return []
     try:
@@ -446,6 +446,14 @@ def run_symptoms_on_roi(roi_bgr: "np.ndarray") -> list:
         if not np.any(keep):
             return []
         boxes = boxes[keep]; scores = scores[keep]; clses = clses[keep]
+        
+        # Filter out invalid class indices (only accept 0-5 for our 6 symptom classes)
+        valid_classes = len(sym_labels) if sym_labels else 6
+        valid_mask = (clses >= 0) & (clses < valid_classes)
+        if not np.any(valid_mask):
+            return []
+        boxes = boxes[valid_mask]; scores = scores[valid_mask]; clses = clses[valid_mask]
+        
         # Assume normalized boxes
         cx = boxes[:, 0] * in_w; cy = boxes[:, 1] * in_h; w = boxes[:, 2] * in_w; h = boxes[:, 3] * in_h
         x1 = np.clip((cx - w/2).astype(np.int32), 0, in_w - 1)
@@ -480,7 +488,10 @@ def symptoms_worker_loop():
                 gx1 = x1c + d["x1"]; gy1 = y1c + d["y1"]
                 gx2 = x2c + d["x2"]; gy2 = y2c + d["y2"]
                 label_idx = d["class"]
-                label = sym_labels[label_idx] if 0 <= label_idx < len(sym_labels) else f"sym{label_idx}"
+                # Double-check label index is valid (should already be filtered, but safety check)
+                if label_idx < 0 or label_idx >= len(sym_labels):
+                    continue
+                label = sym_labels[label_idx]
                 overlays.append({"x1":gx1,"y1":gy1,"x2":gx2,"y2":gy2,"score":d["score"],"label":label})
                 # Debounced alert key by label
                 last_ts = last_symptom_alert_ts.get(label, 0.0)
@@ -488,11 +499,11 @@ def symptoms_worker_loop():
                     with alerts_lock:
                         alerts_queue.append(f"Symptom detected: {label}")
                     last_symptom_alert_ts[label] = now_ts
-            if overlays:
-                with sym_results_lock:
-                    global latest_symptom_overlays, latest_symptoms_ts
-                    latest_symptom_overlays = overlays
-                    latest_symptoms_ts = now_ts
+            # Always update overlays (even if empty) to clear stale detections
+            with sym_results_lock:
+                global latest_symptom_overlays, latest_symptoms_ts
+                latest_symptom_overlays = overlays
+                latest_symptoms_ts = now_ts if overlays else 0.0  # Clear timestamp if no symptoms
         except Exception:
             time.sleep(0.1)
 
@@ -947,11 +958,14 @@ def _postprocess_yolo_rows(out, input_hw: tuple[int,int], map_info, orig_wh, con
     return boxes, scores, classes
 
 def run_tflite_inference(frame_bgr: "np.ndarray") -> list:
-    CONF = float(os.getenv("DETECT_CONF", "0.35"))
+    CONF = float(os.getenv("DETECT_CONF", "0.5"))  # Increased from 0.35 to reduce false positives
     IOU = float(os.getenv("DETECT_IOU", "0.45"))
-    MIN_AREA = float(os.getenv("MIN_AREA_RATIO", "0.003")) * (STREAM_WIDTH * STREAM_HEIGHT)
+    MIN_AREA = float(os.getenv("MIN_AREA_RATIO", "0.01")) * (STREAM_WIDTH * STREAM_HEIGHT)  # Increased from 0.003 to filter tiny detections
     MAX_AREA = float(os.getenv("MAX_AREA_RATIO", "0.7"))   * (STREAM_WIDTH * STREAM_HEIGHT)
     TOPK = int(os.getenv("PRE_NMS_TOPK", "100"))
+    # Aspect ratio filter for chickens (typical chicken is roughly 1:1.2 to 1:2 width:height)
+    MIN_ASPECT_RATIO = float(os.getenv("MIN_ASPECT_RATIO", "0.4"))  # width/height
+    MAX_ASPECT_RATIO = float(os.getenv("MAX_ASPECT_RATIO", "2.5"))  # width/height
 
     with detector_lock:
         if tflite_interpreter is None or model_input_shape is None or np is None or cv2 is None:
@@ -975,10 +989,18 @@ def run_tflite_inference(frame_bgr: "np.ndarray") -> list:
     if boxes_np.size == 0:
         return []
     areas = (boxes_np[:, 2] - boxes_np[:, 0]) * (boxes_np[:, 3] - boxes_np[:, 1])
+    widths = boxes_np[:, 2] - boxes_np[:, 0]
+    heights = boxes_np[:, 3] - boxes_np[:, 1]
+    aspect_ratios = widths / (_np.maximum(heights, 1.0))  # width/height ratio
+    
+    # Filter by area and aspect ratio
     keep_size = (areas >= MIN_AREA) & (areas <= MAX_AREA) & _np.isfinite(areas)
-    if not _np.any(keep_size):
+    keep_aspect = (aspect_ratios >= MIN_ASPECT_RATIO) & (aspect_ratios <= MAX_ASPECT_RATIO)
+    keep = keep_size & keep_aspect
+    
+    if not _np.any(keep):
         return []
-    boxes_np = boxes_np[keep_size]; scores_np = scores_np[keep_size]; classes_np = classes_np[keep_size]
+    boxes_np = boxes_np[keep]; scores_np = scores_np[keep]; classes_np = classes_np[keep]
     # Whitelist classes: Chicken only (primary model)
     try:
         if len(labels) > 1 and "Chicken" in labels:
@@ -1331,7 +1353,15 @@ def detect():
     ts_iso = datetime.utcnow().isoformat()
     vis_path, th_path = save_images_and_build_paths(vis_out, thermal_colored, ts_iso)
 
-    # Insert log row (unchanged)
+    # Only use symptoms if they were detected recently (within last 5 seconds)
+    current_symptoms = []
+    with sym_results_lock:
+        if latest_symptom_overlays and latest_symptoms_ts > 0:
+            time_since_detection = time.time() - latest_symptoms_ts
+            if time_since_detection <= 5.0:  # Only use symptoms detected within last 5 seconds
+                current_symptoms = latest_symptom_overlays
+    
+    # Insert log row
     try:
         insert_log({
             "timestamp": ts_iso,
@@ -1341,8 +1371,8 @@ def detect():
             "bme_gas": bme.get("gas_ohms") if bme else None,
             "thermal_hotspot_temp": hot,
             "ambient_temp": amb,
-            "symptoms_detected": ", ".join(sorted({s["label"] for s in latest_symptom_overlays})) if latest_symptom_overlays else "",
-            "has_abnormality": bool(latest_symptom_overlays),
+            "symptoms_detected": ", ".join(sorted({s["label"] for s in current_symptoms})) if current_symptoms else "",
+            "has_abnormality": bool(current_symptoms),
             "image_path_visible": vis_path,
             "image_path_thermal": th_path,
             "notes": "detect",
@@ -1353,12 +1383,12 @@ def detect():
     return jsonify({
         "status": "online",
         "detections": dets,
-        "symptoms": latest_symptom_overlays,
+        "symptoms": current_symptoms,
         "labels": labels,
         "symptom_labels": sym_labels,
         "saved_visible": vis_path,
         "saved_thermal": th_path,
-        "abnormal": bool(latest_symptom_overlays),
+        "abnormal": bool(current_symptoms),
     })
 
 
