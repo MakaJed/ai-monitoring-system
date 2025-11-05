@@ -624,307 +624,51 @@ def _open_v4l2_device(dev):
 
 
 def initialize_camera_if_available() -> None:
-    """Try legacy PiCamera, then Picamera2, then OpenCV."""
-    global camera_capture, camera_provider, picam2, picam_legacy
-    print("[Camera] Initializing camera...")
+    """Simple camera initialization - Picamera2 first, then OpenCV fallback."""
+    global camera_capture, camera_provider, picam2
     
-    # Check if camera device exists
-    video_devices = []
-    for dev_path in ["/dev/video0", "/dev/video1", "/dev/video2"]:
-        if os.path.exists(dev_path):
-            video_devices.append(dev_path)
-    if video_devices:
-        print(f"[Camera] Found video devices: {', '.join(video_devices)}")
-    else:
-        print("[Camera] Warning: No /dev/video* devices found")
-    
-    # Check available camera libraries
-    print(f"[Camera] Available libraries: PiCamera={PiCamera is not None}, Picamera2={Picamera2 is not None}, OpenCV={cv2 is not None}")
-    
-    # Simple check: if camera already working, don't reinitialize
-    with camera_lock:
-        existing_picam2 = picam2
-        existing_provider = camera_provider
-    if existing_provider == "picamera2" and existing_picam2 is not None:
-        try:
-            # Quick test - just try one capture
-            test = existing_picam2.capture_array()
-            if test is not None and test.size > 0:
-                print("[Camera] Camera already initialized and working, skipping reinit")
-                return
-        except Exception:
-            # Camera exists but not working, continue with reinit
-            pass
-    
-    # Reset camera state before reinitializing
+    # Reset state
     with camera_lock:
         camera_capture = None
-        if picam2 is not None:
-            try:
-                picam2.stop()
-                picam2.close()
-            except Exception:
-                pass
         picam2 = None
-        picam_legacy = None
         camera_provider = None
-
-    # --- Try Legacy PiCamera first (for legacy camera stack) ---
-    if PiCamera is not None:
+    
+    # Prefer Picamera2 (matches working snippet - uses RGB888 format)
+    if Picamera2 is not None and cv2 is not None:
         try:
-            print("[Camera] Trying legacy PiCamera (for legacy camera stack)...")
-            # Note: Legacy PiCamera requires legacy camera interface to be enabled
-            # Check if it's available by trying to create instance
-            cam = PiCamera()
-            cam.resolution = (STREAM_WIDTH, STREAM_HEIGHT)
-            cam.framerate = 30
-            # Start preview to initialize camera (but don't display it)
-            cam.start_preview(fullscreen=False, window=(0, 0, 1, 1))  # Minimal preview
-            time.sleep(2.0)  # Give camera time to initialize
-            
-            # Test capture
-            import io
-            stream = io.BytesIO()
-            cam.capture(stream, format='jpeg', use_video_port=True)
-            stream.seek(0)
-            stream_size = stream.tell()
-            if stream_size > 1000:  # Should be at least 1KB for a valid JPEG
-                cam.stop_preview()
-                with camera_lock:
-                    picam_legacy = cam
-                    camera_provider = "picamera_legacy"
-                print(f"[Camera] OK Legacy PiCamera initialized successfully (test JPEG: {stream_size} bytes)")
-                return
-            else:
-                cam.stop_preview()
-                cam.close()
-                print(f"[Camera] FAIL Legacy PiCamera test capture failed (JPEG size: {stream_size} bytes)")
-        except Exception as e:
-            print(f"[Camera] FAIL Legacy PiCamera init failed: {e}")
-            print("[Camera] Note: Legacy camera may not be enabled. Try: sudo raspi-config -> Interface Options -> Legacy Camera")
-            import traceback
-            traceback.print_exc()
-    else:
-        print("[Camera] Legacy PiCamera not available (module not imported)")
-
-    # --- Try Picamera2 (if available, for libcamera) ---
-    # Use the simple approach that worked before - just specify size, no format
-    if Picamera2 is not None:
-        try:
-            print("[Camera] Trying Picamera2 (libcamera backend)...")
             cam = Picamera2()
-            # Simple config like the old working code - just size, let libcamera choose format
-            preview_config = cam.create_preview_configuration(main={"size": (STREAM_WIDTH, STREAM_HEIGHT)})
-            cam.configure(preview_config)
+            config = cam.create_preview_configuration(main={"size": (STREAM_WIDTH, STREAM_HEIGHT), "format": "RGB888"})
+            cam.configure(config)
             cam.start()
-            time.sleep(1.0)  # Brief stabilization
-            
-            # Simple test - just try to capture once
-            try:
-                test_frame = cam.capture_array()
-                if test_frame is not None and test_frame.size > 0:
-                    with camera_lock:
-                        picam2 = cam
-                        camera_provider = "picamera2"
-                    print(f"[Camera] OK Picamera2 initialized successfully (test frame shape: {test_frame.shape})")
-                    return
-                else:
-                    cam.stop()
-                    cam.close()
-                    print("[Camera] FAIL Picamera2 test capture returned empty frame")
-            except Exception as test_err:
-                cam.stop()
-                cam.close()
-                print(f"[Camera] FAIL Picamera2 test capture failed: {test_err}")
-        except ImportError as e:
-            print(f"[Camera] Picamera2 import failed: {e}")
-            print("[Camera] Try: sudo apt install python3-picamera2")
+            time.sleep(1.0)
+            with camera_lock:
+                picam2 = cam
+                camera_provider = 'picamera2'
+            print("[Camera] OK Picamera2 initialized successfully")
+            return
         except Exception as e:
-            print(f"[Camera] FAIL Picamera2 init failed: {e}")
-            import traceback
-            traceback.print_exc()
-
-    # --- Fallback to OpenCV camera ---
+            print(f"[Camera] Picamera2 init failed: {e}")
+            with camera_lock:
+                picam2 = None
+                camera_provider = None
+    
+    # Fallback: simple OpenCV VideoCapture(0)
     if cv2 is not None:
         try:
-            print("[Camera] Trying OpenCV VideoCapture...")
-            # Try with V4L2 backend explicitly, then default
-            backends_to_try = [
-                (cv2.CAP_V4L2, "V4L2"),
-                (cv2.CAP_ANY, "ANY"),
-            ]
-            
-            # Find all available video devices
-            available_devices = []
-            for dev_path in ["/dev/video0", "/dev/video1", "/dev/video2", "/dev/video10", "/dev/video11", "/dev/video12"]:
-                if os.path.exists(dev_path):
-                    available_devices.append(dev_path)
-            
-            # Also try numeric indices (but avoid duplicates)
-            found_nums = set()
-            for dev in available_devices:
-                if isinstance(dev, str) and dev.startswith("/dev/video"):
-                    try:
-                        found_nums.add(int(dev.replace("/dev/video", "")))
-                    except ValueError:
-                        pass
-            
-            for dev_num in [0, 1, 2, 10, 11, 12]:
-                if dev_num not in found_nums:
-                    available_devices.append(dev_num)
-            
-            if not available_devices:
-                available_devices = [0, "/dev/video0"]
-            
-            print(f"[Camera] Will try devices: {available_devices}")
-            
-            for backend, backend_name in backends_to_try:
-                # Try all available devices
-                for dev_idx in available_devices:
-                    try:
-                        print(f"[Camera] Trying {backend_name} backend with device {dev_idx}...")
-                        cap = cv2.VideoCapture(dev_idx, backend)
-                        if not cap.isOpened():
-                            print(f"[Camera] Could not open device {dev_idx} with {backend_name}")
-                            continue
-                        
-                        print(f"[Camera] Opened device {dev_idx} with {backend_name}")
-                        
-                        # Get current properties for debugging
-                        try:
-                            current_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                            current_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                            current_fps = cap.get(cv2.CAP_PROP_FPS)
-                            print(f"[Camera] Current properties: {int(current_w)}x{int(current_h)} @ {current_fps}fps")
-                        except Exception:
-                            pass
-                        
-                        # Try different formats in order of preference
-                        formats_to_try = [
-                            ('YUYV', cv2.VideoWriter_fourcc(*'YUYV')),
-                            ('MJPG', cv2.VideoWriter_fourcc(*'MJPG')),
-                            ('H264', cv2.VideoWriter_fourcc(*'H264')),
-                        ]
-                        
-                        format_success = False
-                        for fmt_name, fourcc in formats_to_try:
-                            try:
-                                # Set properties
-                                cap.set(cv2.CAP_PROP_FRAME_WIDTH, STREAM_WIDTH)
-                                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, STREAM_HEIGHT)
-                                cap.set(cv2.CAP_PROP_FPS, 30)
-                                cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-                                time.sleep(0.5)
-                                
-                                # Verify format was set
-                                actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-                                print(f"[Camera] Trying format {fmt_name} (fourcc: {actual_fourcc})")
-                                
-                                # Flush stale frames
-                                for flush_idx in range(15):
-                                    try:
-                                        grabbed = cap.grab()
-                                        if not grabbed:
-                                            break
-                                    except Exception:
-                                        pass
-                                    if flush_idx < 14:
-                                        time.sleep(0.05)
-                                
-                                # Try reading with this format
-                                ok, test = False, None
-                                for retry in range(10):
-                                    time.sleep(0.2)
-                                    try:
-                                        ok, test = cap.read()
-                                        if ok and test is not None and test.size > 0:
-                                            if len(test.shape) >= 2 and test.shape[0] > 0 and test.shape[1] > 0:
-                                                # Check if frame has actual content (not all black/zeros)
-                                                frame_mean = test.mean()
-                                                if frame_mean > 5.0:  # Not a black frame
-                                                    print(f"[Camera] Successfully read frame with {fmt_name} (mean: {frame_mean:.1f})")
-                                                    format_success = True
-                                                    break
-                                    except Exception as read_err:
-                                        if retry < 9 and retry % 3 == 0:
-                                            print(f"[Camera] Read error with {fmt_name} (attempt {retry+1}/10): {read_err}")
-                                
-                                if format_success:
-                                    break
-                                else:
-                                    print(f"[Camera] Format {fmt_name} failed, trying next...")
-                            except Exception as fmt_err:
-                                print(f"[Camera] Error setting format {fmt_name}: {fmt_err}")
-                                continue
-                        
-                        if format_success:
-                            # Success - use this cap
-                            pass
-                        else:
-                            # Try one more time with default settings
-                            print("[Camera] Trying with default settings...")
-                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, STREAM_WIDTH)
-                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, STREAM_HEIGHT)
-                            time.sleep(1.0)
-                            
-                            # Flush more aggressively
-                            for _ in range(20):
-                                try:
-                                    cap.grab()
-                                except Exception:
-                                    pass
-                                time.sleep(0.05)
-                            
-                            ok, test = False, None
-                            for retry in range(10):
-                                time.sleep(0.3)
-                                try:
-                                    ok, test = cap.read()
-                                    if ok and test is not None and test.size > 0:
-                                        if len(test.shape) >= 2 and test.shape[0] > 0 and test.shape[1] > 0:
-                                            if test.mean() > 5.0:
-                                                format_success = True
-                                                break
-                                except Exception:
-                                    pass
-                        
-                        if format_success and ok and test is not None:
-                            # Success!
-                            pass
-                        else:
-                            ok, test = False, None
-                        
-                        if format_success:
-                            # Success - we found a working format
-                            with camera_lock:
-                                camera_capture = cap
-                                camera_provider = "cv2"
-                            print(f"[Camera] OK OpenCV VideoCapture initialized successfully (test frame: {test.shape}, backend: {backend_name}, format: {fmt_name})")
-                            return
-                        elif ok and test is not None and test.size > 0:
-                            # Success with default settings
-                            with camera_lock:
-                                camera_capture = cap
-                                camera_provider = "cv2"
-                            print(f"[Camera] OK OpenCV VideoCapture initialized with default settings (test frame: {test.shape}, backend: {backend_name})")
-                            return
-                        else:
-                            print(f"[Camera] FAIL Could not read valid frame from {dev_idx} with {backend_name}")
-                            try:
-                                cap.release()
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        print(f"[Camera] FAIL OpenCV failed on {dev_idx} with {backend_name}: {e}")
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                        continue
+            cap = cv2.VideoCapture(0)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, STREAM_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, STREAM_HEIGHT)
+                ok, test = cap.read()
+                if ok and test is not None:
+                    with camera_lock:
+                        camera_capture = cap
+                        camera_provider = 'cv2'
+                    print("[Camera] OK OpenCV VideoCapture initialized successfully")
+                    return
+                cap.release()
         except Exception as e:
-            print(f"[Camera] FAIL OpenCV init failed: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[Camera] OpenCV init failed: {e}")
     
     print("[Camera] FAIL No camera available")
 
@@ -937,60 +681,21 @@ def read_camera_frame() -> tuple[bool, "np.ndarray | None"]:
     with camera_lock:
         provider = camera_provider
 
-    if provider == "picamera_legacy":
-        with camera_lock:
-            cam = picam_legacy
-        if cam is None:
-            return False, None
-        try:
-            # Use capture_continuous for video port (faster)
-            import io
-            stream = io.BytesIO()
-            cam.capture(stream, format='jpeg', use_video_port=True)
-            stream.seek(0)
-            frame_bytes = stream.read()
-            if frame_bytes:
-                # Decode JPEG to numpy array
-                frame_array = np.frombuffer(frame_bytes, dtype=np.uint8)
-                frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
-                if frame is not None and frame.size > 0:
-                    if frame.shape[1] != STREAM_WIDTH or frame.shape[0] != STREAM_HEIGHT:
-                        frame = cv2.resize(frame, (STREAM_WIDTH, STREAM_HEIGHT))
-                    return True, frame
-            return False, None
-        except Exception:
-            return False, None
-
-    elif provider == "picamera2":
+    if provider == 'picamera2':
         with camera_lock:
             cam = picam2
         if cam is None:
             return False, None
         try:
-            # Simple approach like old code - just capture_array()
-            frame = cam.capture_array()
-            if frame is None or frame.size == 0:
-                return False, None
-            
-            # Convert to BGR if needed (Picamera2 usually returns RGB)
-            if hasattr(frame, "ndim") and frame.ndim == 3:
-                if frame.shape[2] == 3:
-                    # Assume RGB, convert to BGR for OpenCV
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            
-            # Resize if needed
+            rgb = cam.capture_array()
+            frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             if frame.shape[1] != STREAM_WIDTH or frame.shape[0] != STREAM_HEIGHT:
                 frame = cv2.resize(frame, (STREAM_WIDTH, STREAM_HEIGHT))
             return True, frame
-        except Exception as e:
-            # Log error occasionally
-            import time
-            if not hasattr(read_camera_frame, '_last_error_log') or time.time() - read_camera_frame._last_error_log > 10:
-                print(f"[Camera] read_camera_frame error: {e}")
-                read_camera_frame._last_error_log = time.time()
+        except Exception:
             return False, None
 
-    elif provider == "cv2":
+    if provider == 'cv2':
         with camera_lock:
             cap = camera_capture
         if cap is None:
@@ -998,33 +703,32 @@ def read_camera_frame() -> tuple[bool, "np.ndarray | None"]:
         ok, frame = cap.read()
         if not ok or frame is None:
             return False, None
-        frame = cv2.resize(frame, (STREAM_WIDTH, STREAM_HEIGHT))
+        try:
+            if frame.shape[1] != STREAM_WIDTH or frame.shape[0] != STREAM_HEIGHT:
+                frame = cv2.resize(frame, (STREAM_WIDTH, STREAM_HEIGHT))
+        except Exception:
+            pass
         return True, frame
 
     return False, None
 
 
 def release_camera() -> None:
+    if cv2 is None:
+        return
     with camera_lock:
-        global camera_capture, picam2, picam_legacy
+        global camera_capture, picam2
         try:
             if camera_capture is not None:
                 camera_capture.release()
             if picam2 is not None:
                 try:
                     picam2.stop()
-                    picam2.close()
-                except Exception:
-                    pass
-            if picam_legacy is not None:
-                try:
-                    picam_legacy.close()
                 except Exception:
                     pass
         finally:
             camera_capture = None
             picam2 = None
-            picam_legacy = None
 
 
 def _get_or_create_i2c():
@@ -1903,18 +1607,9 @@ def index():
 
 @app.route("/camera_feed")
 def camera_feed():
-    global camera_provider, picam2
     with camera_lock:
         provider = camera_provider
-    if provider not in ('cv2', 'picamera2', 'picamera_legacy'):
-        # Try to initialize if not already done
-        try:
-            initialize_camera_if_available()
-        except Exception:
-            pass
-        with camera_lock:
-            provider = camera_provider
-    if provider not in ('cv2', 'picamera2', 'picamera_legacy'):
+    if provider not in ('cv2', 'picamera2'):
         return jsonify({"error": "cam offline"}), 503
     return Response(stream_with_context(generate_camera_stream()),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
