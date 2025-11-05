@@ -641,8 +641,31 @@ def initialize_camera_if_available() -> None:
     # Check available camera libraries
     print(f"[Camera] Available libraries: PiCamera={PiCamera is not None}, Picamera2={Picamera2 is not None}, OpenCV={cv2 is not None}")
     
+    # Don't reset existing camera if it's already working
+    with camera_lock:
+        existing_picam2 = picam2
+        existing_provider = camera_provider
+    # If camera is already working, don't reinitialize
+    if existing_provider == "picamera2" and existing_picam2 is not None:
+        try:
+            # Quick test to see if camera is still working
+            test = existing_picam2.capture_array()
+            if test is not None and getattr(test, "size", 0) > 0:
+                print("[Camera] Camera already initialized and working, skipping reinit")
+                return
+        except Exception:
+            # Camera exists but not working, continue with reinit
+            pass
+    
     with camera_lock:
         camera_capture = None
+        # Only reset if we're going to create a new one
+        if picam2 is not None:
+            try:
+                picam2.stop()
+                picam2.close()
+            except Exception:
+                pass
         picam2 = None
         picam_legacy = None
         camera_provider = None
@@ -983,7 +1006,16 @@ def read_camera_frame() -> tuple[bool, "np.ndarray | None"]:
         with camera_lock:
             cam = picam2
         if cam is None:
-            return False, None
+            print("[Camera] read_camera_frame: picam2 is None, attempting reinit...")
+            # Try to reinitialize if camera object is lost
+            try:
+                initialize_camera_if_available()
+            except Exception as e:
+                print(f"[Camera] read_camera_frame reinit failed: {e}")
+            with camera_lock:
+                cam = picam2
+            if cam is None:
+                return False, None
         try:
             rgb = cam.capture_array()
             # If frame already RGB
@@ -1010,7 +1042,12 @@ def read_camera_frame() -> tuple[bool, "np.ndarray | None"]:
             if frame.shape[1] != STREAM_WIDTH or frame.shape[0] != STREAM_HEIGHT:
                 frame = cv2.resize(frame, (STREAM_WIDTH, STREAM_HEIGHT))
             return True, frame
-        except Exception:
+        except Exception as e:
+            # Log error occasionally to debug camera read failures
+            import time
+            if not hasattr(read_camera_frame, '_last_error_log') or time.time() - read_camera_frame._last_error_log > 10:
+                print(f"[Camera] read_camera_frame error: {e}")
+                read_camera_frame._last_error_log = time.time()
             return False, None
 
     elif provider == "cv2":
@@ -1929,6 +1966,16 @@ def camera_feed():
     global camera_provider, picam2
     with camera_lock:
         provider = camera_provider
+        cam_obj = picam2
+    # If provider says picamera2 but camera object is None, reinitialize
+    if provider == "picamera2" and cam_obj is None:
+        print("[Camera] camera_feed: provider is picamera2 but picam2 is None, reinitializing...")
+        try:
+            initialize_camera_if_available()
+        except Exception as e:
+            print(f"[Camera] camera_feed reinit failed: {e}")
+        with camera_lock:
+            provider = camera_provider
     if provider not in ('cv2', 'picamera2', 'picamera_legacy'):
         # Attempt reinitialization on-demand
         try:
