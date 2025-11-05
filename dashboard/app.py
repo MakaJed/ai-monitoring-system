@@ -4,7 +4,7 @@ import time
 import json
 import math
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import deque
 import sqlite3
 import queue
@@ -41,14 +41,6 @@ try:
 except Exception:  # pragma: no cover
     Interpreter = None
 
-# Optional plotting for daily PNG summaries
-try:
-    import matplotlib
-    matplotlib.use("Agg")  # headless backend
-    import matplotlib.pyplot as plt  # type: ignore
-except Exception:  # pragma: no cover
-    matplotlib = None
-    plt = None
 # Adafruit sensor libs (available on Pi)
 try:
     import board  # type: ignore
@@ -67,29 +59,9 @@ try:
 except Exception:  # pragma: no cover
     adafruit_mlx90640 = None
 
-# Try legacy picamera (for legacy camera stack) first, then picamera2 (for libcamera)
 try:
-    import picamera  # type: ignore  # Legacy camera
-    from picamera import PiCamera  # type: ignore
-    print("[Import] Legacy picamera library imported successfully")
-except ImportError as ie:
-    print(f"[Import] Legacy picamera import failed: {ie}")
-    picamera = None  # type: ignore
-    PiCamera = None  # type: ignore
-except Exception as e:
-    print(f"[Import] Legacy picamera import error: {e}")
-    picamera = None  # type: ignore
-    PiCamera = None  # type: ignore
-
-try:
-    from picamera2 import Picamera2  # type: ignore  # New libcamera
-    print("[Import] Picamera2 library imported successfully")
-except ImportError as ie:
-    print(f"[Import] Picamera2 import failed: {ie}")
-    print("[Import] Try: pip3 install picamera2  or  sudo apt install python3-picamera2")
-    Picamera2 = None
-except Exception as e:
-    print(f"[Import] Picamera2 import error: {e}")
+    from picamera2 import Picamera2  # type: ignore
+except Exception:  # pragma: no cover
     Picamera2 = None
 
 
@@ -116,24 +88,6 @@ def _no_cache(response):  # type: ignore[override]
     except Exception:
         pass
     return response
-def add_alert(text: str) -> None:
-    try:
-        ts = datetime.utcnow().isoformat()
-        with alert_seq_lock:
-            global alert_seq
-            alert_seq += 1
-            aid = alert_seq
-        payload = {"id": aid, "timestamp": ts, "text": text, "read": False}
-        with alerts_lock:
-            alerts_queue.append(text)
-            alerts_log.append(payload)
-        # update overlay banner
-        global last_alert_time, last_alert_message
-        last_alert_time = time.time()
-        last_alert_message = text
-    except Exception:
-        pass
-
 
 
 # Paths and configuration
@@ -149,19 +103,14 @@ LABELS_PATH = os.path.join(MODELS_DIR, LABELS_FILE)
 # Data directory for images and SQLite
 DATA_DIR = os.path.join(PROJECT_ROOT, "data", "logs")
 DB_PATH = os.path.join(DATA_DIR, "logs.db")
-SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
-SUMMARIES_DIR = os.path.join(DATA_DIR, "summaries")
 
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(SUMMARIES_DIR, exist_ok=True)
 
 
 # Global state
 camera_lock = threading.Lock()
 camera_capture = None  # type: ignore
-picam2 = None  # type: ignore
-camera_provider = None  # type: ignore
 latest_frame_bgr = None  # type: ignore
 
 thermal_lock = threading.Lock()
@@ -171,10 +120,6 @@ thermal_shape = (24, 32)  # MLX90640 default
 bme680_lock = threading.Lock()
 bme680_sensor = None  # type: ignore
 
-# Shared I2C bus for sensors
-i2c_lock = threading.Lock()
-shared_i2c = None  # type: ignore
-
 detector_lock = threading.Lock()
 tflite_interpreter = None  # type: ignore
 model_input_shape = None
@@ -182,10 +127,6 @@ labels = []
 
 alerts_lock = threading.Lock()
 alerts_queue = deque(maxlen=200)  # recent alerts kept in memory
-# Structured alerts log (id, ts, text, read)
-alerts_log = deque(maxlen=500)
-alert_seq_lock = threading.Lock()
-alert_seq = 0
 
 # Unified stream sizing
 STREAM_WIDTH = 640
@@ -229,10 +170,6 @@ sym_results_lock = threading.Lock()
 latest_symptom_overlays = []  # list of {x1,y1,x2,y2,score,label}
 latest_symptoms_ts = 0.0
 last_symptom_alert_ts = {}
-
-# Settings cache (overrides env at runtime)
-settings_lock = threading.Lock()
-settings_cache = {}
 
 # Camera configuration via environment
 CAMERA_PROVIDER = os.getenv("CAMERA_PROVIDER", "picamera2").lower()  # picamera2|v4l2
@@ -282,40 +219,6 @@ def init_db() -> None:
             conn.close()
         except Exception:
             pass
-
-
-def load_settings() -> dict:
-    global settings_cache
-    try:
-        if os.path.isfile(SETTINGS_PATH):
-            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        else:
-            data = {}
-    except Exception:
-        data = {}
-    with settings_lock:
-        settings_cache = data
-    return data
-
-
-def save_settings(new_settings: dict) -> None:
-    with settings_lock:
-        settings_cache.update(new_settings or {})
-        data = settings_cache.copy()
-    try:
-        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-    except Exception:
-        pass
-
-
-def get_setting(key: str, default: str) -> str:
-    with settings_lock:
-        if key in settings_cache:
-            return str(settings_cache[key])
-    return os.getenv(key, default)
 
 
 def insert_log(row: dict) -> None:
@@ -409,21 +312,13 @@ def save_images_and_build_paths(frame_bgr: "np.ndarray | None", thermal_colored:
 
 
 def cleanup_normal_logs_loop() -> None:
-    # Configurable retention (reloaded each cycle from settings)
-    normal_hours = float(get_setting("NORMAL_LOG_RETENTION_HOURS", "2"))
-    abnormal_days = float(get_setting("ABNORMAL_LOG_RETENTION_DAYS", "0"))  # 0 = keep forever
-    vacuum_every_hours = float(get_setting("LOG_VACUUM_EVERY_HOURS", "24"))
+    # Configurable retention: normal logs trimmed by hours; abnormal kept or trimmed by days
+    normal_hours = float(os.getenv("NORMAL_LOG_RETENTION_HOURS", "2"))
+    abnormal_days = float(os.getenv("ABNORMAL_LOG_RETENTION_DAYS", "0"))  # 0 = keep forever
+    vacuum_every_hours = float(os.getenv("LOG_VACUUM_EVERY_HOURS", "24"))
     last_vacuum = 0.0
     while True:
         try:
-            # reload settings periodically
-            try:
-                load_settings()
-                normal_hours = float(get_setting("NORMAL_LOG_RETENTION_HOURS", str(normal_hours)))
-                abnormal_days = float(get_setting("ABNORMAL_LOG_RETENTION_DAYS", str(abnormal_days)))
-                vacuum_every_hours = float(get_setting("LOG_VACUUM_EVERY_HOURS", str(vacuum_every_hours)))
-            except Exception:
-                pass
             now_ts = datetime.utcnow().timestamp()
             # Normal logs cutoff
             normal_cutoff_iso = datetime.utcfromtimestamp(now_ts - normal_hours * 3600).isoformat()
@@ -520,7 +415,7 @@ def initialize_symptoms_detector():
 
 
 def run_symptoms_on_roi(roi_bgr: "np.ndarray") -> list:
-    SYM_CONF = float(get_setting("SYMPTOMS_CONF", "0.35"))
+    SYM_CONF = float(os.getenv("SYMPTOMS_CONF", "0.35"))
     if sym_interpreter is None or sym_input_shape is None or cv2 is None or np is None:
         return []
     try:
@@ -590,7 +485,8 @@ def symptoms_worker_loop():
                 # Debounced alert key by label
                 last_ts = last_symptom_alert_ts.get(label, 0.0)
                 if now_ts - last_ts >= DEBOUNCE_SEC:
-                    add_alert(f"Symptom detected: {label}")
+                    with alerts_lock:
+                        alerts_queue.append(f"Symptom detected: {label}")
                     last_symptom_alert_ts[label] = now_ts
             if overlays:
                 with sym_results_lock:
@@ -624,16 +520,14 @@ def _open_v4l2_device(dev):
 
 
 def initialize_camera_if_available() -> None:
-    """Simple camera initialization - Picamera2 first, then OpenCV fallback."""
     global camera_capture, camera_provider, picam2
-    
     # Reset state
     with camera_lock:
         camera_capture = None
         picam2 = None
         camera_provider = None
-    
-    # Prefer Picamera2 (matches working snippet - uses RGB888 format)
+
+    # Prefer Picamera2 (matches working snippet)
     if Picamera2 is not None and cv2 is not None:
         try:
             cam = Picamera2()
@@ -644,15 +538,13 @@ def initialize_camera_if_available() -> None:
             with camera_lock:
                 picam2 = cam
                 camera_provider = 'picamera2'
-            print("[Camera] OK Picamera2 initialized successfully")
-            return
-        except Exception as e:
-            print(f"[Camera] Picamera2 init failed: {e}")
+                return
+        except Exception:
             with camera_lock:
                 picam2 = None
                 camera_provider = None
-    
-    # Fallback: simple OpenCV VideoCapture(0)
+
+    # Fallback: simple OpenCV VideoCapture(0) (no CAP_V4L2 flags)
     if cv2 is not None:
         try:
             cap = cv2.VideoCapture(0)
@@ -664,20 +556,15 @@ def initialize_camera_if_available() -> None:
                     with camera_lock:
                         camera_capture = cap
                         camera_provider = 'cv2'
-                    print("[Camera] OK OpenCV VideoCapture initialized successfully")
-                    return
+                        return
                 cap.release()
-        except Exception as e:
-            print(f"[Camera] OpenCV init failed: {e}")
-    
-    print("[Camera] FAIL No camera available")
+        except Exception:
+            pass
 
 
 def read_camera_frame() -> tuple[bool, "np.ndarray | None"]:
-    """Grab a single frame from the active camera."""
     if np is None or cv2 is None:
         return False, None
-
     with camera_lock:
         provider = camera_provider
 
@@ -717,217 +604,26 @@ def release_camera() -> None:
     if cv2 is None:
         return
     with camera_lock:
-        global camera_capture, picam2
+        global camera_capture
         try:
             if camera_capture is not None:
                 camera_capture.release()
-            if picam2 is not None:
-                try:
-                    picam2.stop()
-                except Exception:
-                    pass
         finally:
             camera_capture = None
-            picam2 = None
-
-
-def _get_or_create_i2c():
-    """Get or create shared I2C bus instance."""
-    global shared_i2c
-    if board is None or busio is None:
-        return None
-    with i2c_lock:
-        if shared_i2c is None:
-            try:
-                print("[I2C] Creating shared I2C bus...")
-                shared_i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
-                print("[I2C] OK Shared I2C bus created")
-            except Exception as e:
-                print(f"[I2C] FAIL Could not create I2C bus: {e}")
-                import traceback
-                traceback.print_exc()
-                return None
-        return shared_i2c
-
-
-def _init_thermal_raw_i2c(i2c):
-    """Try to initialize thermal sensor with raw I2C access, bypassing calibration checks."""
-    # This is a workaround for sensors with calibration issues
-    # Note: The adafruit library doesn't allow bypassing the calibration check
-    # So this function currently just returns None - the workaround would require
-    # modifying the library or using raw I2C commands
-    print("[Thermal] Raw I2C workaround not yet implemented - requires library modification")
-    return None
-
-
-def _init_thermal_sensor_with_timeout(i2c, timeout_seconds=10):
-    """Initialize thermal sensor with timeout to prevent hanging."""
-    import signal
-    
-    def timeout_handler(signum, frame):
-        raise TimeoutError("Thermal sensor initialization timed out")
-    
-    # Set up timeout (only works on Unix)
-    if hasattr(signal, 'SIGALRM'):
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(timeout_seconds)
-        try:
-            sensor = adafruit_mlx90640.MLX90640(i2c)
-            signal.alarm(0)  # Cancel timeout
-            signal.signal(signal.SIGALRM, old_handler)
-            return sensor
-        except TimeoutError:
-            signal.alarm(0)  # Cancel timeout
-            signal.signal(signal.SIGALRM, old_handler)
-            raise
-        except Exception as e:
-            signal.alarm(0)  # Cancel timeout
-            signal.signal(signal.SIGALRM, old_handler)
-            raise e
-    else:
-        # Windows or no SIGALRM - use threading timeout instead
-        import threading
-        result = [None]
-        exception = [None]
-        
-        def init_sensor():
-            try:
-                result[0] = adafruit_mlx90640.MLX90640(i2c)
-            except Exception as e:
-                exception[0] = e
-        
-        thread = threading.Thread(target=init_sensor)
-        thread.daemon = True
-        thread.start()
-        thread.join(timeout=timeout_seconds)
-        
-        if thread.is_alive():
-            # Thread is still running - timeout
-            raise TimeoutError("Thermal sensor initialization timed out")
-        if exception[0]:
-            raise exception[0]
-        return result[0]
 
 
 def initialize_thermal_if_available() -> None:
     global thermal_sensor
-    print("[Thermal] Initializing MLX90640 thermal sensor...")
-    
-    if adafruit_mlx90640 is None:
-        print("[Thermal] FAIL adafruit_mlx90640 module not available")
+    if adafruit_mlx90640 is None or board is None or busio is None:
         return
-    if board is None:
-        print("[Thermal] FAIL board module not available")
-        return
-    if busio is None:
-        print("[Thermal] FAIL busio module not available")
-        return
-    
-    i2c = _get_or_create_i2c()
-    if i2c is None:
-        print("[Thermal] FAIL Could not get I2C bus")
-        return
-    
     try:
         with thermal_lock:
             if thermal_sensor is None:
-                print("[Thermal] Creating MLX90640 sensor instance...")
-                # Try multiple times - sometimes the sensor needs a few attempts
-                for attempt in range(3):  # Reduced attempts since we have timeout
-                    try:
-                        # Try to create sensor instance with timeout
-                        print(f"[Thermal] Attempt {attempt+1}/3 (with 10s timeout)...")
-                        thermal_sensor = _init_thermal_sensor_with_timeout(i2c, timeout_seconds=10)
-                        # 8 Hz refresh
-                        thermal_sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
-                        print("[Thermal] Testing frame read...")
-                        # Test reading a frame with retries
-                        test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
-                        for read_attempt in range(3):
-                            try:
-                                thermal_sensor.getFrame(test_frame)
-                                min_temp = min(test_frame)
-                                max_temp = max(test_frame)
-                                avg_temp = sum(test_frame) / len(test_frame)
-                                # Validate frame has reasonable values
-                                if -40 <= min_temp <= 125 and -40 <= max_temp <= 125:
-                                    print(f"[Thermal] OK MLX90640 initialized successfully (test: min={min_temp:.1f}C, max={max_temp:.1f}C, avg={avg_temp:.1f}C)")
-                                    return
-                                else:
-                                    print(f"[Thermal] Warning: Invalid temp range (min={min_temp:.1f}C, max={max_temp:.1f}C), retrying...")
-                                    time.sleep(0.5)
-                            except RuntimeError as read_err:
-                                # RuntimeError during getFrame - try again
-                                if read_attempt < 2:
-                                    time.sleep(0.1)
-                                    continue
-                                else:
-                                    raise read_err
-                            except Exception as read_err:
-                                if read_attempt < 2:
-                                    time.sleep(0.5)
-                                    continue
-                                else:
-                                    raise read_err
-                        # If we get here, frame read succeeded but values were invalid
-                        print("[Thermal] Warning: Frame read succeeded but values seem invalid, continuing anyway...")
-                        return
-                    except TimeoutError as e:
-                        print(f"[Thermal] FAIL Initialization timed out after 10 seconds: {e}")
-                        if attempt < 2:
-                            print(f"[Thermal] Retrying ({attempt+1}/3)...")
-                            time.sleep(2.0)
-                            thermal_sensor = None
-                            continue
-                        else:
-                            raise e
-                    except RuntimeError as e:
-                        error_str = str(e)
-                        if "outlier pixels" in error_str:
-                            print(f"[Thermal] Outlier pixels error: {e}")
-                            print("[Thermal] Sensor detected at I2C 0x33 but has calibration issues.")
-                            print("[Thermal] This is a known issue with some MLX90640 sensors.")
-                            print("[Thermal] Possible solutions:")
-                            print("[Thermal]   1. Sensor may need recalibration (contact manufacturer)")
-                            print("[Thermal]   2. Try warming up sensor for 10-15 minutes")
-                            print("[Thermal]   3. Check I2C connections and power supply")
-                            print("[Thermal]   4. Sensor may have hardware defects - consider replacement")
-                            if attempt < 2:
-                                print(f"[Thermal] Retrying ({attempt+1}/3) after 5s delay...")
-                                time.sleep(5.0)
-                                thermal_sensor = None
-                                continue
-                            else:
-                                # Final attempt - try raw I2C workaround
-                                print("[Thermal] Attempting final workaround with raw I2C...")
-                                try:
-                                    raw_sensor = _init_thermal_raw_i2c(i2c)
-                                    if raw_sensor is not None:
-                                        thermal_sensor = raw_sensor
-                                        thermal_sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
-                                        print("[Thermal] OK Sensor initialized with workaround (reduced accuracy expected)")
-                                        return
-                                    else:
-                                        raise e
-                                except Exception:
-                                    raise e
-                        else:
-                            raise e
-                    except Exception as e:
-                        if attempt < 2:
-                            print(f"[Thermal] Warning: Init attempt {attempt+1}/3 failed: {e}, retrying...")
-                            time.sleep(2.0)
-                            thermal_sensor = None
-                            continue
-                        else:
-                            raise e
-    except Exception as e:
-        print(f"[Thermal] FAIL MLX90640 init failed after all retries: {e}")
-        print("[Thermal] Note: 'More than 4 outlier pixels' indicates sensor calibration issues.")
-        print("[Thermal] This may require sensor recalibration or hardware replacement.")
-        print("[Thermal] System will continue without thermal imaging.")
-        import traceback
-        traceback.print_exc()
+                i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+                thermal_sensor = adafruit_mlx90640.MLX90640(i2c)
+                # 8 Hz refresh
+                thermal_sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
+    except Exception:
         with thermal_lock:
             thermal_sensor = None
 
@@ -939,108 +635,29 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
         try:
             frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
             thermal_sensor.getFrame(frame)
-            # Validate frame values (check for NaN/Inf and reasonable range)
-            import math
-            valid_values = [v for v in frame if math.isfinite(v) and -40 <= v <= 125]
-            if len(valid_values) < len(frame) * 0.9:  # Less than 90% valid
-                return False, None
             return True, frame
-        except Exception as e:
-            # Log error occasionally (not every frame)
-            import time
-            if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 10:
-                print(f"[Thermal] Read error: {e}")
-                read_thermal_frame._last_error_log = time.time()
+        except Exception:
             return False, None
 
 
 def initialize_bme680_if_available() -> None:
     global bme680_sensor
-    print("[BME680] Initializing BME680 environmental sensor...")
-    
-    if adafruit_bme680 is None:
-        print("[BME680] FAIL adafruit_bme680 module not available")
+    if adafruit_bme680 is None or board is None or busio is None:
         return
-    if board is None:
-        print("[BME680] FAIL board module not available")
-        return
-    if busio is None:
-        print("[BME680] FAIL busio module not available")
-        return
-    
-    i2c = _get_or_create_i2c()
-    if i2c is None:
-        print("[BME680] FAIL Could not get I2C bus")
-        return
-    
     try:
         with bme680_lock:
             if bme680_sensor is None:
+                i2c = busio.I2C(board.SCL, board.SDA)
                 # Try common I2C addresses: 0x76 and 0x77
                 for addr in (0x76, 0x77):
                     try:
-                        print(f"[BME680] Trying address 0x{addr:02X}...")
-                        # Add small delay to avoid I2C conflicts
-                        time.sleep(0.2)
                         sensor = adafruit_bme680.Adafruit_BME680_I2C(i2c, address=addr)
                         sensor.sea_level_pressure = 1013.25
-                        # Test reading with retries (I2C can be flaky)
-                        for read_retry in range(3):
-                            try:
-                                time.sleep(0.5)  # Let sensor stabilize
-                                temp = sensor.temperature
-                                humidity = sensor.relative_humidity
-                                pressure = sensor.pressure
-                                gas = sensor.gas
-                                # Validate readings are reasonable
-                                if -40 <= temp <= 85 and 0 <= humidity <= 100 and 300 <= pressure <= 1100:
-                                    bme680_sensor = sensor
-                                    print(f"[BME680] OK BME680 initialized at 0x{addr:02X} (test: temp={temp:.1f}C, humidity={humidity:.1f}%, pressure={pressure:.1f}hPa, gas={gas:.0f}ohms)")
-                                    return
-                                else:
-                                    print(f"[BME680] Warning: Invalid readings (temp={temp}, humidity={humidity}, pressure={pressure}), retrying...")
-                                    time.sleep(0.5)
-                            except Exception as read_err:
-                                if read_retry < 2:
-                                    print(f"[BME680] Read error on attempt {read_retry+1}/3: {read_err}, retrying...")
-                                    time.sleep(0.5)
-                                    continue
-                                else:
-                                    raise read_err
-                    except OSError as os_err:
-                        # I2C I/O error - might be temporary, try again
-                        if "Input/output error" in str(os_err):
-                            print(f"[BME680] I2C I/O error at 0x{addr:02X}: {os_err}")
-                            print("[BME680] This might be due to I2C bus conflicts. Retrying after delay...")
-                            time.sleep(1.0)
-                            # Try one more time
-                            try:
-                                sensor = adafruit_bme680.Adafruit_BME680_I2C(i2c, address=addr)
-                                sensor.sea_level_pressure = 1013.25
-                                time.sleep(0.8)
-                                temp = sensor.temperature
-                                humidity = sensor.relative_humidity
-                                pressure = sensor.pressure
-                                gas = sensor.gas
-                                bme680_sensor = sensor
-                                print(f"[BME680] OK BME680 initialized at 0x{addr:02X} after retry (test: temp={temp:.1f}C, humidity={humidity:.1f}%, pressure={pressure:.1f}hPa, gas={gas:.0f}ohms)")
-                                return
-                            except Exception:
-                                print(f"[BME680] Retry also failed for 0x{addr:02X}")
-                                continue
-                        else:
-                            print(f"[BME680] Address 0x{addr:02X} failed: {os_err}")
-                            continue
-                    except Exception as e:
-                        print(f"[BME680] Address 0x{addr:02X} failed: {e}")
+                        bme680_sensor = sensor
+                        break
+                    except Exception:
                         continue
-                print("[BME680] FAIL BME680 not found at addresses 0x76 or 0x77")
-    except Exception as e:
-        print(f"[BME680] FAIL BME680 init failed: {e}")
-        print("[BME680] Note: I2C errors may be due to bus conflicts or sensor disconnection")
-        print("[BME680] Try: sudo i2cdetect -y 1  # Check if sensor appears")
-        import traceback
-        traceback.print_exc()
+    except Exception:
         with bme680_lock:
             bme680_sensor = None
 
@@ -1066,52 +683,16 @@ def initialize_detector_if_available() -> None:
 
 
 def ensure_initialized() -> None:
-    print("\n" + "="*60)
-    print("NDV Monitoring System - Initialization")
-    print("="*60)
     load_labels()
     load_symptoms_labels()
-    load_settings()
-    # Initialize sensors with delays to avoid I2C conflicts
-    # BME680 first (it was working before)
-    print("[Init] Step 1: Initializing BME680...")
-    initialize_bme680_if_available()
-    time.sleep(1.0)  # Give I2C bus time to settle
-    
-    # Then thermal (uses same I2C bus, but different address)
-    print("[Init] Step 2: Initializing thermal sensor...")
-    initialize_thermal_if_available()
-    time.sleep(0.5)
-    
-    # Then camera (independent hardware)
-    print("[Init] Step 3: Initializing camera...")
     initialize_camera_if_available()
-    # Models last
+    initialize_thermal_if_available()
+    initialize_bme680_if_available()
     initialize_detector_if_available()
     initialize_symptoms_detector()
     # Start symptoms worker thread
     symptoms_worker_thread = threading.Thread(target=symptoms_worker_loop, daemon=True)
     symptoms_worker_thread.start()
-    
-    # Print summary
-    print("\n" + "="*60)
-    print("Initialization Summary:")
-    print("="*60)
-    with bme680_lock:
-        bme_status = "OK" if bme680_sensor is not None else "FAIL"
-    with thermal_lock:
-        thermal_status = "OK" if thermal_sensor is not None else "FAIL"
-    with camera_lock:
-        camera_status = "OK" if camera_provider is not None else "FAIL"
-    with detector_lock:
-        model_status = "OK" if tflite_interpreter is not None else "FAIL"
-    
-    print(f"  BME680:     {bme_status}")
-    print(f"  Thermal:    {thermal_status}")
-    print(f"  Camera:     {camera_status} ({camera_provider or 'none'})")
-    print(f"  Model:      {model_status}")
-    print(f"  Symptoms:   {'OK' if sym_interpreter is not None else 'FAIL'}")
-    print("="*60 + "\n")
 
 
 def log_csv(record: dict) -> None:
@@ -1366,11 +947,11 @@ def _postprocess_yolo_rows(out, input_hw: tuple[int,int], map_info, orig_wh, con
     return boxes, scores, classes
 
 def run_tflite_inference(frame_bgr: "np.ndarray") -> list:
-    CONF = float(get_setting("DETECT_CONF", "0.35"))
-    IOU = float(get_setting("DETECT_IOU", "0.45"))
-    MIN_AREA = float(get_setting("MIN_AREA_RATIO", "0.003")) * (STREAM_WIDTH * STREAM_HEIGHT)
-    MAX_AREA = float(get_setting("MAX_AREA_RATIO", "0.7"))   * (STREAM_WIDTH * STREAM_HEIGHT)
-    TOPK = int(get_setting("PRE_NMS_TOPK", "100"))
+    CONF = float(os.getenv("DETECT_CONF", "0.35"))
+    IOU = float(os.getenv("DETECT_IOU", "0.45"))
+    MIN_AREA = float(os.getenv("MIN_AREA_RATIO", "0.003")) * (STREAM_WIDTH * STREAM_HEIGHT)
+    MAX_AREA = float(os.getenv("MAX_AREA_RATIO", "0.7"))   * (STREAM_WIDTH * STREAM_HEIGHT)
+    TOPK = int(os.getenv("PRE_NMS_TOPK", "100"))
 
     with detector_lock:
         if tflite_interpreter is None or model_input_shape is None or np is None or cv2 is None:
@@ -1474,20 +1055,7 @@ def colormap_thermal(values: list[float]) -> "np.ndarray | None":
         if max_v - min_v < 1e-6:
             max_v = min_v + 1e-6
         norm = ((arr - min_v) / (max_v - min_v) * 255.0).astype(np.uint8)
-        # Custom colormap: cooler (blue/green) -> warmer (orange/red)
-        # Create lookup table: 0=blue, 85=cyan, 170=green, 212=yellow, 255=red
-        lut = np.zeros((256, 1, 3), dtype=np.uint8)
-        for i in range(256):
-            if i < 85:  # blue -> cyan: increase green from 0 to 255
-                r, g, b = 0, int(i * 255 / 85), 255
-            elif i < 170:  # cyan -> green: decrease blue from 255 to 0
-                r, g, b = 0, 255, int(255 - (i - 85) * 255 / 85)
-            elif i < 212:  # green -> yellow: increase red from 0 to 255
-                r, g, b = int((i - 170) * 255 / 42), 255, 0
-            else:  # yellow -> orange -> red: decrease green from 255 to 0
-                r, g, b = 255, int(255 - (i - 212) * 255 / 43), 0
-            lut[i, 0] = [b, g, r]  # BGR format
-        colored = cv2.LUT(norm, lut)
+        colored = cv2.applyColorMap(norm, cv2.COLORMAP_INFERNO)
         return colored
     except Exception:
         return None
@@ -1667,13 +1235,6 @@ def detect():
             return jsonify({"status": "offline", "reason": "model unavailable"}), 503
 
     ok, frame = read_camera_frame()
-    if (not ok or frame is None) and np is not None:
-        # Retry a few times to tolerate intermittent read failures
-        for _ in range(4):
-            time.sleep(0.15)
-            ok, frame = read_camera_frame()
-            if ok and frame is not None:
-                break
     if not ok or frame is None or np is None:
         return jsonify({"status": "offline", "reason": "camera unavailable"}), 503
 
@@ -1814,64 +1375,13 @@ def status():
 @app.route("/notifications")
 def notifications():
     with alerts_lock:
-        items = list(alerts_log)
+        items = list(alerts_queue)
     return jsonify({"alerts": items})
-
-
-@app.route("/api/alerts/read", methods=["POST"])  # mark read by id
-def api_alerts_read():
-    try:
-        payload = request.get_json(silent=True) or {}
-        ids = payload.get("ids", [])
-        if not isinstance(ids, list):
-            return jsonify({"ok": False, "error": "ids must be list"}), 400
-        with alerts_lock:
-            for a in list(alerts_log):
-                if a["id"] in ids:
-                    a["read"] = True
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/summaries/generate", methods=["POST"])  # manual trigger
-def api_generate_summaries():
-    try:
-        # run once immediately for yesterday
-        th = threading.Thread(target=daily_summaries_worker, daemon=True)
-        th.start()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/logs")
 def logs_page():
     return render_template("logs.html")
-
-
-@app.route("/settings", methods=["GET"])
-def settings_page():
-    return render_template("settings.html")
-
-
-@app.route("/api/settings", methods=["GET", "POST"])
-def api_settings():
-    if request.method == "GET":
-        return jsonify(load_settings())
-    try:
-        payload = request.get_json(silent=True) or {}
-        # allow specific keys only
-        allowed = {
-            "DETECT_CONF", "DETECT_IOU", "PRE_NMS_TOPK", "MIN_AREA_RATIO", "MAX_AREA_RATIO",
-            "SYMPTOMS_CONF", "SYMPTOMS_MAX_ROI",
-            "NORMAL_LOG_RETENTION_HOURS", "ABNORMAL_LOG_RETENTION_DAYS", "LOG_VACUUM_EVERY_HOURS",
-        }
-        updates = {k: payload[k] for k in payload.keys() if k in allowed}
-        save_settings(updates)
-        return jsonify({"ok": True, "saved": updates})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/api/logs")
@@ -2054,20 +1564,9 @@ def api_summaries():
         monthly = [
             {"month": row[0], "count": row[1], "abnormal": int(row[2] or 0)} for row in cur.fetchall()
         ]
-        return jsonify({
-            "daily": daily,
-            "weekly": weekly,
-            "monthly": monthly,
-            "status_summary": status_counts,
-        })
-    except Exception as e:
-        print(f"[Summaries] Error: {e}")
-        return jsonify({
-            "daily": [],
-            "weekly": [],
-            "monthly": [],
-            "status_summary": {"normal": 0, "warning": 0, "critical": 0}
-        })
+        return jsonify({"daily": daily, "weekly": weekly, "monthly": monthly, "status_counts": status_counts})
+    except Exception:
+        return jsonify({"daily": [], "weekly": [], "monthly": [], "status_counts": {"normal": 0, "warning": 0, "critical": 0}})
     finally:
         try:
             conn.close()
@@ -2135,87 +1634,6 @@ def _cleanup(exception):  # noqa: ANN001
     release_camera()
 
 
-def daily_summaries_worker() -> None:
-    # Generate CSV + PNG at midnight based on last day's data
-    while True:
-        try:
-            now = datetime.now()
-            # compute next midnight
-            nxt = (now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
-            sleep_s = max(5.0, (nxt - now).total_seconds())
-            time.sleep(sleep_s)
-            # fetch yesterday day string
-            yday = (nxt - timedelta(days=1)).strftime('%Y-%m-%d')
-            conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT timestamp, bme_temp, bme_humidity, bme_pressure, bme_gas,
-                       has_abnormality,
-                       CASE WHEN symptoms_detected IS NOT NULL AND LENGTH(symptoms_detected)>0 THEN 1 ELSE 0 END
-                FROM logs
-                WHERE substr(timestamp,1,10)=?
-                ORDER BY timestamp ASC
-                """,
-                (yday,)
-            )
-            rows = cur.fetchall()
-            conn.close()
-            if not rows:
-                # Still post a daily summary notification without files
-                add_alert(f"Daily summary ready: {yday}")
-                # Weekly/monthly checks still run based on calendar
-                pass
-            # write CSV
-            csv_path = os.path.join(SUMMARIES_DIR, f"{yday}.csv")
-            with open(csv_path, 'w', encoding='utf-8') as f:
-                f.write('timestamp,temp,humidity,pressure,gas,abnormal,symptom\n')
-                for r in rows:
-                    f.write(','.join(str(x if x is not None else '') for x in r) + '\n')
-            # plot PNG if matplotlib available
-            if plt is not None and rows:
-                times = [r[0][11:16] for r in rows]
-                temp = [r[1] for r in rows]
-                hum  = [r[2] for r in rows]
-                gas  = [ (r[4]/1000.0 if (r[4] is not None and r[4]>1000) else r[4]) for r in rows ]
-                fig, ax1 = plt.subplots(figsize=(10,4))
-                ax1.set_title(f"NDV Daily Summary - {yday}")
-                # trend color: green if falling humidity, orange if rising
-                if hum and hum[0] is not None and hum[-1] is not None and hum[-1] > hum[0]:
-                    c_h = '#f59e0b'
-                else:
-                    c_h = '#16a34a'
-                ax1.plot(times, temp, color='#ef4444', label='Temp (C)')
-                ax1.set_ylabel('Temp (C)', color='#ef4444')
-                ax2 = ax1.twinx()
-                ax2.plot(times, hum, color=c_h, label='Humidity (%)')
-                ax2.plot(times, gas, color='#0ea5e9', linestyle='--', label='Gas (kOhm)')
-                ax2.set_ylabel('Humidity / Gas (kOhm)')
-                fig.autofmt_xdate(rotation=45)
-                fig.tight_layout()
-                png_path = os.path.join(SUMMARIES_DIR, f"{yday}.png")
-                fig.savefig(png_path)
-                plt.close(fig)
-                add_alert(f"Daily summary ready: {yday}")
-
-            # Also raise weekly and monthly summary notifications at boundaries
-            # Weekly: when yday is Sunday (ISO weekday 7) we announce Weekly
-            try:
-                ydate = datetime.strptime(yday, '%Y-%m-%d').date()
-                # ISO weekday: Monday=1..Sunday=7; if Sunday, post weekly summary
-                if ydate.isoweekday() == 7:
-                    wk = ydate.isocalendar().week
-                    add_alert(f"Weekly summary ready: {ydate.isocalendar().year}-W{wk:02d}")
-                # Monthly: if yday is last day of month, post monthly summary
-                first_next = (ydate.replace(day=1) + timedelta(days=32)).replace(day=1)
-                last_this = first_next - timedelta(days=1)
-                if ydate == last_this:
-                    add_alert(f"Monthly summary ready: {ydate.strftime('%Y-%m')}")
-            except Exception:
-                pass
-        except Exception:
-            time.sleep(60.0)
-
 def main() -> None:
     ensure_initialized()
     # Start symptoms worker if model is available
@@ -2225,9 +1643,6 @@ def main() -> None:
     init_db()
     t = threading.Thread(target=cleanup_normal_logs_loop, daemon=True)
     t.start()
-    # Nightly summaries worker
-    t2 = threading.Thread(target=daily_summaries_worker, daemon=True)
-    t2.start()
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
 
 
