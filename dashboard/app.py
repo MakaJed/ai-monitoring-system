@@ -1414,6 +1414,20 @@ def logs_page():
     return render_template("logs.html")
 
 
+@app.route("/data/logs/<path:filename>")
+def serve_log_image(filename):
+    """Serve images from the data/logs directory."""
+    try:
+        from flask import send_from_directory
+        # Security check: ensure filename doesn't contain path traversal
+        if '..' in filename or filename.startswith('/'):
+            return jsonify({"error": "Invalid path"}), 403
+        # Use send_from_directory for secure file serving
+        return send_from_directory(DATA_DIR, filename)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/logs")
 def api_logs():
     try:
@@ -1470,6 +1484,21 @@ def api_logs():
             except Exception:
                 return "normal"
 
+        # Helper to convert absolute path to relative URL
+        def path_to_url(path):
+            if not path:
+                return None
+            try:
+                # Convert absolute path to relative path from DATA_DIR
+                abs_data_dir = os.path.abspath(DATA_DIR)
+                abs_path = os.path.abspath(path)
+                if abs_path.startswith(abs_data_dir):
+                    rel_path = os.path.relpath(abs_path, abs_data_dir)
+                    return f"/data/logs/{rel_path.replace(os.sep, '/')}"
+                return None
+            except Exception:
+                return None
+        
         for r in cur.fetchall():
             items.append({
                 "id": r[0],
@@ -1482,8 +1511,8 @@ def api_logs():
                 "ambient_temp": r[7],
                 "symptoms_detected": r[8] or "",
                 "has_abnormality": bool(r[9]),
-                "image_path_visible": r[10],
-                "image_path_thermal": r[11],
+                "image_path_visible": path_to_url(r[10]),
+                "image_path_thermal": path_to_url(r[11]),
                 "notes": r[12] or "",
                 "status_level": _status_level(r[2], r[3], r[5], r[4]),
             })

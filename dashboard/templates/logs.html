@@ -3,65 +3,398 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Logs & Analytics</title>
+  <title>Logs & Analytics - NDV Monitor</title>
   <link rel="stylesheet" href="/static/css/style.css?v={{ cache_bust }}" />
   <style>
-    body { background:#f7faf7; color:#1f2937; }
-    .panel { background:#ffffff; box-shadow:0 6px 20px rgba(0,0,0,0.06); border-radius:12px; padding:16px; }
-    .log-card { background:#ffffff; border:1px solid #e5e7eb; border-radius:12px; padding:16px; margin:14px 0; box-shadow:0 4px 16px rgba(0,0,0,0.05); }
-    .log-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
-    .log-title { font-weight:600; }
-    .status-badge { font-size:12px; padding:4px 8px; border-radius:999px; font-weight:600; }
-    .status-normal { background:#e8f5e9; color:#256029; }
-    .status-warning { background:#fff7ed; color:#9a3412; }
-    .status-critical { background:#fef2f2; color:#991b1b; }
-    .log-row { display:flex; gap:16px; flex-wrap:wrap; }
-    .log-col { min-width:150px; }
-    .log-actions { margin-top:10px; display:flex; gap:10px; }
-    .btn-primary { background:#16a34a; color:white; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; }
-    .btn-primary:hover { background:#15803d; }
-    .btn-outline { border:1px solid #94a3b8; color:#334155; background:white; padding:8px 12px; border-radius:8px; cursor:pointer; }
-    .btn-outline:hover { background:#f1f5f9; }
-    .modal { position:fixed; inset:0; background:rgba(0,0,0,0.5); display:none; align-items:center; justify-content:center; }
-    .modal-content { background:#ffffff; padding:12px; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.2); }
-    .modal-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-    .modal img { width:100%; height:auto; border-radius:8px; box-shadow:0 3px 12px rgba(0,0,0,0.08); }
-    .img-cap { font-size:12px; color:#475569; margin-top:4px; text-align:center; }
-    .modal-close { margin-top:10px; }
-    .charts-grid { display:grid; grid-template-columns:1fr; gap:12px; }
-    @media (min-width: 900px){ .charts-grid { grid-template-columns:1fr 1fr; } }
-    .chart-card { background:#ffffff; border:1px solid #e5e7eb; border-radius:12px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,0.05); }
-    .chart-title { font-weight:600; margin-bottom:6px; color:#111827; }
+    * { box-sizing: border-box; }
+    body { 
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      color: #1f2937;
+      margin: 0;
+      padding: 0;
+    }
+    
+    .topbar {
+      background: rgba(255, 255, 255, 0.95);
+      backdrop-filter: blur(10px);
+      padding: 1rem 2rem;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    
+    .brand .title { font-size: 1.5rem; font-weight: 700; color: #1f2937; }
+    .brand .subtitle { font-size: 0.875rem; color: #6b7280; }
+    
+    .container { max-width: 1400px; margin: 2rem auto; padding: 0 1.5rem; }
+    
+    .section {
+      background: white;
+      border-radius: 16px;
+      padding: 2rem;
+      margin-bottom: 2rem;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+    }
+    
+    .section-title {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #111827;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    
+    .logs-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    
+    .log-card {
+      background: linear-gradient(135deg, #f8fafc 0%, #ffffff 100%);
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1rem;
+      transition: all 0.3s ease;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+    
+    .log-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+      border-color: #d1d5db;
+    }
+    
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 1rem;
+      padding-bottom: 1rem;
+      border-bottom: 2px solid #f3f4f6;
+    }
+    
+    .log-timestamp {
+      font-size: 0.875rem;
+      color: #6b7280;
+      font-weight: 500;
+    }
+    
+    .status-badge {
+      font-size: 0.75rem;
+      padding: 0.375rem 0.75rem;
+      border-radius: 999px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    
+    .status-normal { background: #d1fae5; color: #065f46; }
+    .status-warning { background: #fed7aa; color: #9a3412; }
+    .status-critical { background: #fee2e2; color: #991b1b; }
+    
+    .log-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 1rem;
+    }
+    
+    .log-metric {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    
+    .log-metric-label {
+      font-size: 0.75rem;
+      color: #6b7280;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    
+    .log-metric-value {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #111827;
+    }
+    
+    .log-metric-value.unit-temp { color: #ef4444; }
+    .log-metric-value.unit-humidity { color: #3b82f6; }
+    .log-metric-value.unit-gas { color: #f59e0b; }
+    .log-metric-value.unit-pressure { color: #10b981; }
+    
+    .symptoms-badge {
+      display: inline-block;
+      background: #fef3c7;
+      color: #92400e;
+      padding: 0.25rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin: 0.25rem 0.25rem 0.25rem 0;
+    }
+    
+    .log-actions {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid #f3f4f6;
+    }
+    
+    .btn {
+      padding: 0.625rem 1.25rem;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.875rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    
+    .btn-primary {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      color: white;
+      box-shadow: 0 4px 6px rgba(16, 185, 129, 0.3);
+    }
+    
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 12px rgba(16, 185, 129, 0.4);
+    }
+    
+    .btn-outline {
+      background: white;
+      color: #374151;
+      border: 2px solid #e5e7eb;
+    }
+    
+    .btn-outline:hover {
+      background: #f9fafb;
+      border-color: #d1d5db;
+    }
+    
+    .btn-danger {
+      background: #ef4444;
+      color: white;
+    }
+    
+    .btn-danger:hover {
+      background: #dc2626;
+    }
+    
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      margin-top: 2rem;
+    }
+    
+    .page-info {
+      color: #6b7280;
+      font-size: 0.875rem;
+    }
+    
+    /* Modal Styles */
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 2rem;
+    }
+    
+    .modal.active {
+      display: flex;
+    }
+    
+    .modal-content {
+      background: white;
+      border-radius: 16px;
+      padding: 2rem;
+      max-width: 1200px;
+      width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      animation: modalSlideIn 0.3s ease;
+    }
+    
+    @keyframes modalSlideIn {
+      from {
+        opacity: 0;
+        transform: translateY(-20px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 2px solid #f3f4f6;
+    }
+    
+    .modal-title {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #111827;
+    }
+    
+    .modal-close-btn {
+      background: #f3f4f6;
+      border: none;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      color: #6b7280;
+      transition: all 0.2s;
+    }
+    
+    .modal-close-btn:hover {
+      background: #e5e7eb;
+      color: #111827;
+    }
+    
+    .modal-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+    }
+    
+    @media (max-width: 768px) {
+      .modal-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    
+    .modal-image-container {
+      position: relative;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    
+    .modal-image-container img {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    
+    .modal-image-label {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+      color: white;
+      padding: 1rem;
+      font-size: 0.875rem;
+      font-weight: 600;
+    }
+    
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1.5rem;
+    }
+    
+    .chart-card {
+      background: linear-gradient(135deg, #f8fafc 0%, #ffffff 100%);
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+    
+    .chart-title {
+      font-weight: 600;
+      color: #111827;
+      margin-bottom: 1rem;
+      font-size: 1rem;
+    }
+    
+    .loading {
+      text-align: center;
+      padding: 3rem;
+      color: #6b7280;
+    }
+    
+    .empty-state {
+      text-align: center;
+      padding: 3rem;
+      color: #6b7280;
+    }
+    
+    .empty-state-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      opacity: 0.5;
+    }
   </style>
 </head>
 <body>
   <nav class="topbar">
     <div class="brand">
-      <div class="title">NDV Poultry Monitor</div>
-      <div class="subtitle">Logs & Analytics</div>
+      <div class="title">🐔 NDV Poultry Monitor</div>
+      <div class="subtitle">Logs & Analytics Dashboard</div>
     </div>
     <div class="top-actions">
-      <a class="btn" href="/">Dashboard</a>
+      <a class="btn btn-outline" href="/">← Dashboard</a>
     </div>
   </nav>
 
-  <main class="grid" style="grid-template-columns: 1fr;">
-    <section class="panel">
-      <h2 style="margin-bottom:10px; color:#0f172a;">Logs</h2>
-      <div style="margin-bottom:8px; display:flex; gap:8px; align-items:center;">
-        <button id="delete-selected" class="btn btn-outline">Delete Selected</button>
-        <span id="selected-count">0 selected</span>
+  <div class="container">
+    <section class="section">
+      <div class="logs-header">
+        <h2 class="section-title">📋 Detection Logs</h2>
+        <div style="display: flex; gap: 0.75rem; align-items: center;">
+          <button id="delete-selected" class="btn btn-danger">🗑️ Delete Selected</button>
+          <span id="selected-count" class="page-info">0 selected</span>
+        </div>
       </div>
-      <div id="logs-cards">Loading…</div>
-      <div style="margin-top:8px; display:flex; gap:8px;">
-        <button id="prev" class="btn btn-outline">Prev</button>
-        <button id="next" class="btn btn-outline">Next</button>
-        <div id="page-info" style="margin-left:8px;">-</div>
+      <div id="logs-cards" class="loading">Loading logs...</div>
+      <div class="pagination">
+        <button id="prev" class="btn btn-outline">← Previous</button>
+        <div id="page-info" class="page-info">-</div>
+        <button id="next" class="btn btn-outline">Next →</button>
       </div>
     </section>
 
-    <section class="panel">
-      <h2 style="margin-bottom:10px; color:#0f172a;">Analytics</h2>
+    <section class="section">
+      <h2 class="section-title">📊 Analytics & Trends</h2>
       <div class="charts-grid" id="charts">
         <div class="chart-card"><div class="chart-title">Temperature Trend (°C)</div><canvas id="chart-temp" width="560" height="220"></canvas></div>
         <div class="chart-card"><div class="chart-title">Humidity (%) & Gas (kΩ)</div><canvas id="chart-hg" width="560" height="220"></canvas></div>
@@ -69,21 +402,25 @@
         <div class="chart-card"><div class="chart-title">Symptom Detections Over Time</div><canvas id="chart-sym" width="560" height="220"></canvas></div>
       </div>
     </section>
-  </main>
+  </div>
 
+  <!-- Image Modal -->
   <div id="img-modal" class="modal">
     <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title">📷 Detection Images</h3>
+        <button id="img-close" class="modal-close-btn">×</button>
+      </div>
       <div class="modal-grid">
-        <div>
-          <img id="img-visible" src="" alt="Visible image" />
-          <div id="cap-visible" class="img-cap"></div>
+        <div class="modal-image-container">
+          <img id="img-visible" src="" alt="Visible image" style="display: none;" />
+          <div id="cap-visible" class="modal-image-label" style="display: none;"></div>
         </div>
-        <div>
-          <img id="img-thermal" src="" alt="Thermal image" />
-          <div id="cap-thermal" class="img-cap"></div>
+        <div class="modal-image-container">
+          <img id="img-thermal" src="" alt="Thermal image" style="display: none;" />
+          <div id="cap-thermal" class="modal-image-label" style="display: none;"></div>
         </div>
       </div>
-      <div><button id="img-close" class="btn btn-outline modal-close">Close</button></div>
     </div>
   </div>
 
@@ -104,45 +441,106 @@
     let page = 1; const pageSize = 20;
 
     function openImgs(vp, tp, ts){
-      imgVisible.src = vp || '';
-      imgThermal.src = tp || '';
-      capVisible.textContent = vp ? `Visible — ${ts}` : '';
-      capThermal.textContent = tp ? `Thermal — ${ts}` : '';
-      imgModal.style.display = 'flex';
+      if (vp) {
+        imgVisible.src = vp;
+        imgVisible.style.display = 'block';
+        capVisible.textContent = `Visible — ${ts}`;
+        capVisible.style.display = 'block';
+      } else {
+        imgVisible.style.display = 'none';
+        capVisible.style.display = 'none';
+      }
+      
+      if (tp) {
+        imgThermal.src = tp;
+        imgThermal.style.display = 'block';
+        capThermal.textContent = `Thermal — ${ts}`;
+        capThermal.style.display = 'block';
+      } else {
+        imgThermal.style.display = 'none';
+        capThermal.style.display = 'none';
+      }
+      
+      imgModal.classList.add('active');
     }
-    imgClose.addEventListener('click', ()=>{ imgModal.style.display='none'; imgVisible.src=''; imgThermal.src=''; capVisible.textContent=''; capThermal.textContent=''; });
-    imgModal.addEventListener('click', (e)=>{ if(e.target === imgModal){ imgModal.style.display='none'; imgVisible.src=''; imgThermal.src=''; capVisible.textContent=''; capThermal.textContent=''; }});
+    
+    imgClose.addEventListener('click', ()=>{
+      imgModal.classList.remove('active');
+      imgVisible.src = '';
+      imgThermal.src = '';
+      imgVisible.style.display = 'none';
+      imgThermal.style.display = 'none';
+      capVisible.textContent = '';
+      capThermal.textContent = '';
+      capVisible.style.display = 'none';
+      capThermal.style.display = 'none';
+    });
+    
+    imgModal.addEventListener('click', (e)=>{
+      if(e.target === imgModal){
+        imgClose.click();
+      }
+    });
 
     async function loadLogs(){
       try{
         const r = await fetch(`/api/logs?page=${page}&page_size=${pageSize}`);
         const d = await r.json();
-        pageInfo.textContent = `Page ${d.page} / ${Math.max(1, Math.ceil((d.total||0)/(d.page_size||pageSize)))}`;
+        const totalPages = Math.max(1, Math.ceil((d.total||0)/(d.page_size||pageSize)));
+        pageInfo.textContent = `Page ${d.page} / ${totalPages} (${d.total||0} total)`;
+        prev.disabled = page <= 1;
+        next.disabled = page >= totalPages;
+        
         const html = (d.items||[]).map(item=>{
-          const vt = (item.image_path_visible || item.image_path_thermal) ? `<button class=\"btn-primary\" onclick=\"(function(){window.openImgs && window.openImgs('${item.image_path_visible||''}','${item.image_path_thermal||''}','${item.timestamp||''}');})();\">View Images</button>`: '';
+          const vt = (item.image_path_visible || item.image_path_thermal) ? 
+            `<button class="btn btn-primary" onclick="window.openImgs('${item.image_path_visible||''}','${item.image_path_thermal||''}','${item.timestamp||''}');">📷 View Images</button>` : 
+            '<span style="color: #9ca3af; font-size: 0.875rem;">No images</span>';
+          
           const status = (item.has_abnormality ? (item.status_level||'warning') : 'normal');
           const cls = status==='critical' ? 'status-critical' : status==='warning' ? 'status-warning' : 'status-normal';
-          const sym = item.symptoms_detected || '';
+          const sym = item.symptoms_detected || 'None';
+          const symptomsHtml = sym !== 'None' && sym.trim() ? 
+            sym.split(',').map(s => `<span class="symptoms-badge">${s.trim()}</span>`).join('') : 
+            '<span style="color: #9ca3af;">No symptoms detected</span>';
+          
           return `<div class="log-card">
             <div class="log-header">
-              <div class="log-title">📅 ${item.timestamp}</div>
-              <div class="status-badge ${cls}">🧠 ${status.charAt(0).toUpperCase()+status.slice(1)}</div>
+              <div>
+                <div class="log-timestamp">${item.timestamp || 'Unknown'}</div>
+              </div>
+              <div class="status-badge ${cls}">${status.charAt(0).toUpperCase()+status.slice(1)}</div>
             </div>
-            <div class="log-row">
-              <div class="log-col"><b>🌡️ Temp</b><div>${item.bme_temp ?? '-' } °C</div></div>
-              <div class="log-col"><b>💧 Humidity</b><div>${item.bme_humidity ?? '-' } %</div></div>
-              <div class="log-col"><b>🧪 Gas</b><div>${item.bme_gas ?? '-' } kΩ</div></div>
-              <div class="log-col"><b>🌬️ Pressure</b><div>${item.bme_pressure ?? '-' } hPa</div></div>
-              <div class="log-col"><b>Symptoms</b><div>${sym}</div></div>
+            <div class="log-grid">
+              <div class="log-metric">
+                <div class="log-metric-label">🌡️ Temperature</div>
+                <div class="log-metric-value unit-temp">${item.bme_temp ?? '-'} °C</div>
+              </div>
+              <div class="log-metric">
+                <div class="log-metric-label">💧 Humidity</div>
+                <div class="log-metric-value unit-humidity">${item.bme_humidity ?? '-'} %</div>
+              </div>
+              <div class="log-metric">
+                <div class="log-metric-label">🧪 Gas Resistance</div>
+                <div class="log-metric-value unit-gas">${item.bme_gas ? (item.bme_gas / 1000).toFixed(1) : '-'} kΩ</div>
+              </div>
+              <div class="log-metric">
+                <div class="log-metric-label">🌬️ Pressure</div>
+                <div class="log-metric-value unit-pressure">${item.bme_pressure ?? '-'} hPa</div>
+              </div>
+            </div>
+            <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #f3f4f6;">
+              <div class="log-metric-label" style="margin-bottom: 0.5rem;">Symptoms</div>
+              <div>${symptomsHtml}</div>
             </div>
             <div class="log-actions">${vt}</div>
           </div>`;
         }).join('');
-        cards.innerHTML = html || '<div>No logs</div>';
-        // expose opener
+        cards.innerHTML = html || '<div class="empty-state"><div class="empty-state-icon">📭</div><div>No logs found</div></div>';
         window.openImgs = openImgs;
         updateSelectedCount();
-      }catch(e){ cards.textContent = 'Failed to load logs'; }
+      }catch(e){ 
+        cards.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div>Failed to load logs</div></div>';
+      }
     }
 
     async function loadSummaries(){
@@ -150,19 +548,19 @@
         const r = await fetch('/api/summaries');
         const d = await r.json();
         const daily = d.daily||[];
-        // Prepare series
         const labels = daily.map(x=>x.day);
         const temps = daily.map(x=>x.avg_temp ?? null);
         const hums  = daily.map(x=>x.avg_humidity ?? null);
         const gas   = daily.map(x=>x.avg_gas ?? null);
-        const statusCounts = ['normal','warning','critical'].map(k=> (d.status_summary && d.status_summary[k]) || 0);
+        const statusCounts = ['normal','warning','critical'].map(k=> (d.status_counts && d.status_counts[k]) || 0);
         const symCounts = daily.map(x=>x.symptom_count || 0);
-        // Draw charts
         drawLineChart('chart-temp', labels, temps, '#16a34a', 'Temperature Trend (°C)');
         drawDualAxis('chart-hg', labels, hums, gas, '#0ea5e9', '#f59e0b', 'Humidity (%)', 'Gas (kΩ)');
         drawDonut('chart-status', statusCounts, ['#16a34a','#f97316','#ef4444'], ['Normal','Warning','Critical']);
         drawBarChart('chart-sym', labels, symCounts, '#a855f7', 'Symptoms per Day');
-      }catch(e){ document.getElementById('charts').textContent = 'Failed to load summaries'; }
+      }catch(e){ 
+        document.getElementById('charts').innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div>Failed to load analytics</div></div>';
+      }
     }
 
     function getSelectedIds(){
@@ -177,15 +575,16 @@
     document.getElementById('delete-selected').addEventListener('click', async ()=>{
       const ids = getSelectedIds();
       if(ids.length === 0) return;
+      if(!confirm(`Delete ${ids.length} log entry(ies)?`)) return;
       try{
         const r = await fetch('/api/logs/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids})});
         const d = await r.json();
         if(d.ok){ loadLogs(); }
-      }catch(e){}
+      }catch(e){ alert('Failed to delete logs'); }
     });
 
-    prev.addEventListener('click', ()=>{ page=Math.max(1,page-1); loadLogs(); });
-    next.addEventListener('click', ()=>{ page=page+1; loadLogs(); });
+    prev.addEventListener('click', ()=>{ if(page > 1) { page--; loadLogs(); } });
+    next.addEventListener('click', ()=>{ page++; loadLogs(); });
 
     loadLogs(); loadSummaries();
   })();
