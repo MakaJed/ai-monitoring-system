@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Logs & Analytics</title>
+  <link rel="stylesheet" href="/static/css/style.css?v={{ cache_bust }}" />
+  <style>
+    body { background:#f7faf7; color:#1f2937; }
+    .panel { background:#ffffff; box-shadow:0 6px 20px rgba(0,0,0,0.06); border-radius:12px; padding:16px; }
+    .log-card { background:#ffffff; border:1px solid #e5e7eb; border-radius:12px; padding:16px; margin:14px 0; box-shadow:0 4px 16px rgba(0,0,0,0.05); }
+    .log-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+    .log-title { font-weight:600; }
+    .status-badge { font-size:12px; padding:4px 8px; border-radius:999px; font-weight:600; }
+    .status-normal { background:#e8f5e9; color:#256029; }
+    .status-warning { background:#fff7ed; color:#9a3412; }
+    .status-critical { background:#fef2f2; color:#991b1b; }
+    .log-row { display:flex; gap:16px; flex-wrap:wrap; }
+    .log-col { min-width:150px; }
+    .log-actions { margin-top:10px; display:flex; gap:10px; }
+    .btn-primary { background:#16a34a; color:white; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    .btn-primary:hover { background:#15803d; }
+    .btn-outline { border:1px solid #94a3b8; color:#334155; background:white; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    .btn-outline:hover { background:#f1f5f9; }
+    .modal { position:fixed; inset:0; background:rgba(0,0,0,0.5); display:none; align-items:center; justify-content:center; }
+    .modal-content { background:#ffffff; padding:12px; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.2); }
+    .modal-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .modal img { width:100%; height:auto; border-radius:8px; box-shadow:0 3px 12px rgba(0,0,0,0.08); }
+    .img-cap { font-size:12px; color:#475569; margin-top:4px; text-align:center; }
+    .modal-close { margin-top:10px; }
+    .charts-grid { display:grid; grid-template-columns:1fr; gap:12px; }
+    @media (min-width: 900px){ .charts-grid { grid-template-columns:1fr 1fr; } }
+    .chart-card { background:#ffffff; border:1px solid #e5e7eb; border-radius:12px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,0.05); }
+    .chart-title { font-weight:600; margin-bottom:6px; color:#111827; }
+  </style>
+</head>
+<body>
+  <nav class="topbar">
+    <div class="brand">
+      <div class="title">NDV Poultry Monitor</div>
+      <div class="subtitle">Logs & Analytics</div>
+    </div>
+    <div class="top-actions">
+      <a class="btn" href="/">Dashboard</a>
+    </div>
+  </nav>
+
+  <main class="grid" style="grid-template-columns: 1fr;">
+    <section class="panel">
+      <h2 style="margin-bottom:10px; color:#0f172a;">Logs</h2>
+      <div style="margin-bottom:8px; display:flex; gap:8px; align-items:center;">
+        <button id="delete-selected" class="btn btn-outline">Delete Selected</button>
+        <span id="selected-count">0 selected</span>
+      </div>
+      <div id="logs-cards">Loading…</div>
+      <div style="margin-top:8px; display:flex; gap:8px;">
+        <button id="prev" class="btn btn-outline">Prev</button>
+        <button id="next" class="btn btn-outline">Next</button>
+        <div id="page-info" style="margin-left:8px;">-</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2 style="margin-bottom:10px; color:#0f172a;">Analytics</h2>
+      <div class="charts-grid" id="charts">
+        <div class="chart-card"><div class="chart-title">Temperature Trend (°C)</div><canvas id="chart-temp" width="560" height="220"></canvas></div>
+        <div class="chart-card"><div class="chart-title">Humidity (%) & Gas (kΩ)</div><canvas id="chart-hg" width="560" height="220"></canvas></div>
+        <div class="chart-card"><div class="chart-title">Environment Status Summary</div><canvas id="chart-status" width="560" height="220"></canvas></div>
+        <div class="chart-card"><div class="chart-title">Symptom Detections Over Time</div><canvas id="chart-sym" width="560" height="220"></canvas></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="img-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-grid">
+        <div>
+          <img id="img-visible" src="" alt="Visible image" />
+          <div id="cap-visible" class="img-cap"></div>
+        </div>
+        <div>
+          <img id="img-thermal" src="" alt="Thermal image" />
+          <div id="cap-thermal" class="img-cap"></div>
+        </div>
+      </div>
+      <div><button id="img-close" class="btn btn-outline modal-close">Close</button></div>
+    </div>
+  </div>
+
+  <script src="/static/js/charts.js?v={{ cache_bust }}"></script>
+  <script>
+  (function(){
+    const cards = document.getElementById('logs-cards');
+    const prev = document.getElementById('prev');
+    const next = document.getElementById('next');
+    const pageInfo = document.getElementById('page-info');
+    const imgModal = document.getElementById('img-modal');
+    const imgVisible = document.getElementById('img-visible');
+    const imgThermal = document.getElementById('img-thermal');
+    const capVisible = document.getElementById('cap-visible');
+    const capThermal = document.getElementById('cap-thermal');
+    const imgClose = document.getElementById('img-close');
+
+    let page = 1; const pageSize = 20;
+
+    function openImgs(vp, tp, ts){
+      imgVisible.src = vp || '';
+      imgThermal.src = tp || '';
+      capVisible.textContent = vp ? `Visible — ${ts}` : '';
+      capThermal.textContent = tp ? `Thermal — ${ts}` : '';
+      imgModal.style.display = 'flex';
+    }
+    imgClose.addEventListener('click', ()=>{ imgModal.style.display='none'; imgVisible.src=''; imgThermal.src=''; capVisible.textContent=''; capThermal.textContent=''; });
+    imgModal.addEventListener('click', (e)=>{ if(e.target === imgModal){ imgModal.style.display='none'; imgVisible.src=''; imgThermal.src=''; capVisible.textContent=''; capThermal.textContent=''; }});
+
+    async function loadLogs(){
+      try{
+        const r = await fetch(`/api/logs?page=${page}&page_size=${pageSize}`);
+        const d = await r.json();
+        pageInfo.textContent = `Page ${d.page} / ${Math.max(1, Math.ceil((d.total||0)/(d.page_size||pageSize)))}`;
+        const html = (d.items||[]).map(item=>{
+          const vt = (item.image_path_visible || item.image_path_thermal) ? `<button class=\"btn-primary\" onclick=\"(function(){window.openImgs && window.openImgs('${item.image_path_visible||''}','${item.image_path_thermal||''}','${item.timestamp||''}');})();\">View Images</button>`: '';
+          const status = (item.has_abnormality ? (item.status_level||'warning') : 'normal');
+          const cls = status==='critical' ? 'status-critical' : status==='warning' ? 'status-warning' : 'status-normal';
+          const sym = item.symptoms_detected || '';
+          return `<div class="log-card">
+            <div class="log-header">
+              <div class="log-title">📅 ${item.timestamp}</div>
+              <div class="status-badge ${cls}">🧠 ${status.charAt(0).toUpperCase()+status.slice(1)}</div>
+            </div>
+            <div class="log-row">
+              <div class="log-col"><b>🌡️ Temp</b><div>${item.bme_temp ?? '-' } °C</div></div>
+              <div class="log-col"><b>💧 Humidity</b><div>${item.bme_humidity ?? '-' } %</div></div>
+              <div class="log-col"><b>🧪 Gas</b><div>${item.bme_gas ?? '-' } kΩ</div></div>
+              <div class="log-col"><b>🌬️ Pressure</b><div>${item.bme_pressure ?? '-' } hPa</div></div>
+              <div class="log-col"><b>Symptoms</b><div>${sym}</div></div>
+            </div>
+            <div class="log-actions">${vt}</div>
+          </div>`;
+        }).join('');
+        cards.innerHTML = html || '<div>No logs</div>';
+        // expose opener
+        window.openImgs = openImgs;
+        updateSelectedCount();
+      }catch(e){ cards.textContent = 'Failed to load logs'; }
+    }
+
+    async function loadSummaries(){
+      try{
+        const r = await fetch('/api/summaries');
+        const d = await r.json();
+        const daily = d.daily||[];
+        // Prepare series
+        const labels = daily.map(x=>x.day);
+        const temps = daily.map(x=>x.avg_temp ?? null);
+        const hums  = daily.map(x=>x.avg_humidity ?? null);
+        const gas   = daily.map(x=>x.avg_gas ?? null);
+        const statusCounts = ['normal','warning','critical'].map(k=> (d.status_summary && d.status_summary[k]) || 0);
+        const symCounts = daily.map(x=>x.symptom_count || 0);
+        // Draw charts
+        drawLineChart('chart-temp', labels, temps, '#16a34a', 'Temperature Trend (°C)');
+        drawDualAxis('chart-hg', labels, hums, gas, '#0ea5e9', '#f59e0b', 'Humidity (%)', 'Gas (kΩ)');
+        drawDonut('chart-status', statusCounts, ['#16a34a','#f97316','#ef4444'], ['Normal','Warning','Critical']);
+        drawBarChart('chart-sym', labels, symCounts, '#a855f7', 'Symptoms per Day');
+      }catch(e){ document.getElementById('charts').textContent = 'Failed to load summaries'; }
+    }
+
+    function getSelectedIds(){
+      return Array.from(document.querySelectorAll('.sel:checked')).map(x=>parseInt(x.getAttribute('data-id'))).filter(Boolean);
+    }
+    function updateSelectedCount(){
+      const sel = getSelectedIds();
+      document.getElementById('selected-count').textContent = `${sel.length} selected`;
+    }
+    document.addEventListener('change', (e)=>{ if(e.target && e.target.classList && e.target.classList.contains('sel')) updateSelectedCount(); });
+
+    document.getElementById('delete-selected').addEventListener('click', async ()=>{
+      const ids = getSelectedIds();
+      if(ids.length === 0) return;
+      try{
+        const r = await fetch('/api/logs/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids})});
+        const d = await r.json();
+        if(d.ok){ loadLogs(); }
+      }catch(e){}
+    });
+
+    prev.addEventListener('click', ()=>{ page=Math.max(1,page-1); loadLogs(); });
+    next.addEventListener('click', ()=>{ page=page+1; loadLogs(); });
+
+    loadLogs(); loadSummaries();
+  })();
+  </script>
+</body>
+</html>

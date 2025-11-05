@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+logs/
+normal_logs/
+*.csv
+models/*.tflite

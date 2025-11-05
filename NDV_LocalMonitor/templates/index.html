@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NDV Poultry Monitor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link href="/static/styles.css" rel="stylesheet" />
+  </head>
+  <body class="bg-light">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+      <div class="container-fluid">
+        <span class="navbar-brand">NDV Poultry Monitor</span>
+        <div class="d-flex">
+          <button class="btn btn-outline-warning" id="alertsBtn">🔔 Alerts</button>
+        </div>
+      </div>
+    </nav>
+
+    <div class="container my-3">
+      <div class="row g-3">
+        <div class="col-12 col-lg-7">
+          <div class="card shadow-sm">
+            <div class="card-header">Live Camera + YOLO</div>
+            <div class="card-body text-center">
+              <img id="video" src="/video_feed" class="img-fluid border" alt="video" />
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-lg-5">
+          <div class="card shadow-sm mb-3">
+            <div class="card-header">Thermal View</div>
+            <div class="card-body text-center">
+              <img id="thermal" src="/thermal_feed" class="img-fluid border" alt="thermal" />
+            </div>
+          </div>
+          <div class="card shadow-sm">
+            <div class="card-header">Environment</div>
+            <div class="card-body">
+              <div id="env-status" class="small text-muted mb-2">Loading...</div>
+              <div class="row" id="env">
+                <div class="col-6 mb-2"><strong>Temp</strong>: <span id="temperature_c">-</span> °C</div>
+                <div class="col-6 mb-2"><strong>Humidity</strong>: <span id="humidity_percent">-</span> %</div>
+                <div class="col-6 mb-2"><strong>Pressure</strong>: <span id="pressure_hpa">-</span> hPa</div>
+                <div class="col-6 mb-2"><strong>Gas</strong>: <span id="gas_ohms">-</span> Ω</div>
+                <div class="col-6 mb-2"><strong>Altitude</strong>: <span id="altitude_m">-</span> m</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row g-3 mt-1">
+        <div class="col-12">
+          <div class="card shadow-sm">
+            <div class="card-header">Daily Summary (24h)</div>
+            <div class="card-body">
+              <pre id="summary" class="mb-0 small"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" tabindex="-1" id="alertsModal">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Alerts</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <pre id="alerts" class="mb-0 small"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/main.js"></script>
+  </body>
+  </html>
+
+

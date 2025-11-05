@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NDV Poultry Monitor</title>
+  <link rel="stylesheet" href="/static/css/style.css?v={{ cache_bust }}" />
+  <style>
+    .notif-wrap { position: relative; }
+    .notif-menu { position:absolute; right:0; top:36px; width:320px; max-height:360px; overflow:auto; background:#fff; color:#111827; border:1px solid #e5e7eb; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,0.12); display:none; z-index:20; }
+    .notif-header { display:flex; justify-content:space-between; align-items:center; padding:8px 10px; border-bottom:1px solid #e5e7eb; font-weight:600; }
+    .notif-list { list-style:none; padding:0; margin:0; }
+    .notif-item { padding:8px 10px; border-bottom:1px solid #f1f5f9; }
+    .notif-item.unread { background:#f8fafc; }
+    .notif-time { font-size:11px; color:#64748b; margin-top:2px; }
+    .notif-actions { padding:8px 10px; display:flex; justify-content:flex-end; gap:8px; }
+  </style>
+</head>
+<body>
+  <!-- Navigation Bar -->
+  <nav class="topbar">
+    <div class="brand">
+      <div class="title">NDV Poultry Monitor</div>
+      <div class="subtitle">Raspberry Pi + OpenCV Chicken Health</div>
+    </div>
+    <div class="top-actions">
+      <button id="btn-dashboard" class="btn">Dashboard</button>
+      <a class="btn btn-outline" href="/logs">Logs &amp; Analytics</a>
+      <div class="notifications notif-wrap">
+        <button id="notif-toggle" class="btn btn-outline">🔔</button>
+        <span id="notif-badge" class="badge">0</span>
+        <div id="notif-menu" class="notif-menu">
+          <div class="notif-header">Notifications <span id="notif-count"></span></div>
+          <ul id="notif-list" class="notif-list"></ul>
+          <div class="notif-actions"><button id="notif-mark-all" class="btn btn-outline">Mark all read</button></div>
+        </div>
+      </div>
+      <a class="btn btn-outline" href="/settings">Settings</a>
+      <div id="online-indicator" class="indicator online">Offline</div>
+    </div>
+  </nav>
+
+  <!-- System Status Strip -->
+  <div class="status-strip">
+    <div>CPU: <span id="cpu-percent">-</span>%</div>
+    <div>CPU Temp: <span id="cpu-temp">-</span>°C</div>
+    <div>RAM: <span id="mem-percent">-</span>%</div>
+    <div>Uptime: <span id="uptime">-</span></div>
+  </div>
+
+  <!-- Main Grid -->
+  <main class="grid">
+    <!-- Left Panel -->
+    <section class="panel left">
+      <div class="panel-header">
+        <h2 id="camera-title">Live Cameras</h2>
+        <div class="panel-actions">
+          <span id="model-status" class="badge badge-ok">Model: OK</span>
+        <button id="fs-visible" class="btn btn-outline">Fullscreen Visible</button>
+        <button id="fs-thermal" class="btn btn-outline">Fullscreen Thermal</button>
+        </div>
+      </div>
+      <div id="alert-banner" class="alert-banner hidden">
+        <span id="alert-text">No alerts</span>
+        <button id="alert-close" class="btn btn-outline" style="margin-left:8px;">Dismiss</button>
+      </div>
+      <div id="split-area" class="split">
+        <div class="split-stream">
+          <div class="split-title">Visible</div>
+          <img id="stream-visible" alt="Visible Stream" />
+        </div>
+        <div class="split-stream">
+          <div class="split-title">Thermal</div>
+          <img id="stream-thermal" alt="Thermal Stream" />
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Panel -->
+    <aside class="panel right">
+      <div class="sensors-summary">All Sensors Online</div>
+      <div class="sensor-cards">
+        <div class="card">
+          <div class="card-header">
+            <span>Temperature</span>
+            <span id="badge-temp" class="badge badge-ok">Normal</span>
+          </div>
+          <div class="card-value"><span id="temp">-</span> °C</div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <span>Humidity</span>
+            <span id="badge-hum" class="badge badge-ok">Normal</span>
+          </div>
+          <div class="card-value"><span id="hum">-</span> %</div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <span>Gas Resistance</span>
+            <span id="badge-gas" class="badge badge-ok">Normal</span>
+          </div>
+          <div class="card-value"><span id="gas">-</span> Ω</div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <span>Pressure</span>
+            <span id="badge-pres" class="badge badge-ok">Normal</span>
+          </div>
+          <div class="card-value"><span id="pres">-</span> hPa</div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Bottom Analytics Section -->
+  <section class="analytics">
+    <h3>Historical Data &amp; Analytics</h3>
+    <div class="charts-grid" id="charts">
+      <div class="chart-card"><div class="chart-title">Temperature Trend (°C)</div><canvas id="chart-temp" width="560" height="220"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Humidity (%) &amp; Gas (kΩ)</div><canvas id="chart-hg" width="560" height="220"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Environment Status Summary</div><canvas id="chart-status" width="560" height="220"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Symptom Detections Over Time</div><canvas id="chart-sym" width="560" height="220"></canvas></div>
+    </div>
+  </section>
+
+  <script src="/static/js/app.js?v={{ cache_bust }}"></script>
+  <script src="/static/js/charts.js?v={{ cache_bust }}"></script>
+  <script>
+  (function(){
+    function enterFS(el){ if(el.requestFullscreen){ el.requestFullscreen(); } }
+    const v = document.getElementById('stream-visible');
+    const t = document.getElementById('stream-thermal');
+    document.getElementById('fs-visible')?.addEventListener('click', ()=> enterFS(v));
+    document.getElementById('fs-thermal')?.addEventListener('click', ()=> enterFS(t));
+  })();
+  </script>
+</body>
+</html>

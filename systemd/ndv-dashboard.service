@@ -1,0 +1,17 @@
+[Unit]
+Description=NDV Poultry Monitor Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/NDV_Monitoring/dashboard
+# Use the project's virtual environment Python if present
+ExecStart=/home/pi/NDV_Monitoring/.venv/bin/python3 /home/pi/NDV_Monitoring/dashboard/app.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
