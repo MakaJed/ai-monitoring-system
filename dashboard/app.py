@@ -630,68 +630,76 @@ def initialize_thermal_if_available() -> None:
         return
     
     print("[Thermal] Initializing MLX90640 thermal sensor...")
-    
-    # First, try to detect if device exists on I2C bus
-    try:
-        import smbus2
-        bus = smbus2.SMBus(1)  # I2C bus 1
-        mlx90640_addr = 0x33
-        try:
-            bus.read_byte(mlx90640_addr)
-            print(f"[Thermal] Device detected at 0x{mlx90640_addr:02X}")
-            bus.close()
-        except Exception:
-            bus.close()
-            print(f"[Thermal] WARNING: No device found at 0x{mlx90640_addr:02X} - sensor may not be connected")
-            print("[Thermal] Thermal sensor will be unavailable. Check wiring and power.")
-            with thermal_lock:
-                thermal_sensor = None
-            return
-    except ImportError:
-        print("[Thermal] smbus2 not available for device detection, proceeding...")
-    except Exception as e:
-        print(f"[Thermal] Could not scan I2C bus: {e}")
+    print("[Thermal] Note: MLX90640 should be at I2C address 0x33")
     
     for attempt in range(3):
         try:
             print(f"[Thermal] Attempt {attempt + 1}/3...")
+            # Create I2C bus with longer stabilization
             i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
-            time.sleep(0.5)  # Give I2C bus time to stabilize
+            time.sleep(1.0)  # Give I2C bus more time to stabilize
             
+            print("[Thermal] Creating MLX90640 sensor instance...")
             sensor = adafruit_mlx90640.MLX90640(i2c)
             sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
-            time.sleep(1.0)  # Let sensor initialize (increased delay)
+            print("[Thermal] Refresh rate set, waiting for sensor...")
+            time.sleep(2.0)  # Longer delay for sensor to initialize
             
             # Test read to verify it works
+            print("[Thermal] Testing frame read...")
             test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
             sensor.getFrame(test_frame)
+            
             if test_frame and len(test_frame) == thermal_shape[0] * thermal_shape[1]:
                 # Check if we got valid temperature values (not all zeros)
                 max_temp = max(test_frame)
                 min_temp = min(test_frame)
+                avg_temp = sum(test_frame) / len(test_frame)
+                
                 if max_temp > 10.0 and min_temp >= -40.0:  # Reasonable temperature check
                     with thermal_lock:
                         thermal_sensor = sensor
-                    print(f"[Thermal] OK MLX90640 initialized successfully (test: {min_temp:.1f}°C to {max_temp:.1f}°C)")
+                    print(f"[Thermal] OK MLX90640 initialized successfully!")
+                    print(f"[Thermal] Test frame: min={min_temp:.1f}°C, max={max_temp:.1f}°C, avg={avg_temp:.1f}°C")
                     return
                 else:
                     print(f"[Thermal] Warning: Test frame has invalid values (min: {min_temp:.1f}°C, max: {max_temp:.1f}°C)")
             else:
-                print("[Thermal] Warning: Test frame size mismatch")
+                print(f"[Thermal] Warning: Test frame size mismatch (got {len(test_frame) if test_frame else 0}, expected {thermal_shape[0] * thermal_shape[1]})")
             
             # If we get here, test failed - try again
-            time.sleep(2.0)
+            i2c.deinit()  # Clean up
+            time.sleep(3.0)
         except Exception as e:
-            print(f"[Thermal] Init attempt {attempt + 1}/3 failed: {e}")
+            error_msg = str(e)
+            print(f"[Thermal] Init attempt {attempt + 1}/3 failed: {error_msg}")
+            
+            # Clean up I2C on error
+            try:
+                i2c.deinit()
+            except:
+                pass
+            
             if attempt < 2:
-                time.sleep(2.0)
+                print(f"[Thermal] Retrying in 3 seconds...")
+                time.sleep(3.0)
             else:
                 print("[Thermal] FAIL MLX90640 initialization failed after 3 attempts")
-                print("[Thermal] Note: Thermal sensor will be unavailable. Check:")
-                print("[Thermal]   1. MLX90640 is connected to I2C bus")
-                print("[Thermal]   2. Sensor is powered (3.3V)")
-                print("[Thermal]   3. I2C is enabled (sudo raspi-config)")
-                print("[Thermal]   4. Wiring: SCL=GPIO3, SDA=GPIO2")
+                print("[Thermal] ==========================================")
+                print("[Thermal] DIAGNOSIS: Sensor not detected on I2C bus")
+                print("[Thermal] ==========================================")
+                print("[Thermal] Troubleshooting checklist:")
+                print("[Thermal]   1. Check physical connections:")
+                print("[Thermal]      - VDD → 3.3V (pin 1)")
+                print("[Thermal]      - GND → Ground (pin 6)")
+                print("[Thermal]      - SCL → GPIO3/SCL (pin 5)")
+                print("[Thermal]      - SDA → GPIO2/SDA (pin 3)")
+                print("[Thermal]   2. Verify power: MLX90640 needs stable 3.3V")
+                print("[Thermal]   3. Check I2C is enabled: sudo raspi-config")
+                print("[Thermal]   4. Test manually: python3 dashboard/thermal_debug.py")
+                print("[Thermal]   5. Check wiring with multimeter if needed")
+                print("[Thermal] ==========================================")
+                print("[Thermal] App will continue without thermal sensor.")
                 with thermal_lock:
                     thermal_sensor = None
 
