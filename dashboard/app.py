@@ -626,29 +626,80 @@ def release_camera() -> None:
 def initialize_thermal_if_available() -> None:
     global thermal_sensor
     if adafruit_mlx90640 is None or board is None or busio is None:
+        print("[Thermal] MLX90640 libraries not available")
         return
-    try:
-        with thermal_lock:
-            if thermal_sensor is None:
-                i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
-                thermal_sensor = adafruit_mlx90640.MLX90640(i2c)
-                # 8 Hz refresh
-                thermal_sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
-    except Exception:
-        with thermal_lock:
-            thermal_sensor = None
+    
+    print("[Thermal] Initializing MLX90640 thermal sensor...")
+    for attempt in range(3):
+        try:
+            print(f"[Thermal] Attempt {attempt + 1}/3...")
+            i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+            time.sleep(0.5)  # Give I2C bus time to stabilize
+            
+            sensor = adafruit_mlx90640.MLX90640(i2c)
+            sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
+            time.sleep(0.5)  # Let sensor initialize
+            
+            # Test read to verify it works
+            test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
+            sensor.getFrame(test_frame)
+            if test_frame and len(test_frame) == thermal_shape[0] * thermal_shape[1]:
+                # Check if we got valid temperature values (not all zeros)
+                if max(test_frame) > 10.0:  # Reasonable temperature check
+                    with thermal_lock:
+                        thermal_sensor = sensor
+                    print(f"[Thermal] OK MLX90640 initialized successfully (test: {max(test_frame):.1f}°C)")
+                    return
+                else:
+                    print(f"[Thermal] Warning: Test frame has low values (max: {max(test_frame):.1f}°C)")
+            else:
+                print("[Thermal] Warning: Test frame size mismatch")
+            
+            # If we get here, test failed - try again
+            time.sleep(1.0)
+        except Exception as e:
+            print(f"[Thermal] Init attempt {attempt + 1}/3 failed: {e}")
+            if attempt < 2:
+                time.sleep(2.0)
+            else:
+                print("[Thermal] FAIL MLX90640 initialization failed after 3 attempts")
+                with thermal_lock:
+                    thermal_sensor = None
 
 
 def read_thermal_frame() -> tuple[bool, list[float] | None]:
     with thermal_lock:
         if thermal_sensor is None:
             return False, None
+    
+    # Retry up to 3 times if read fails
+    for retry in range(3):
         try:
             frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
-            thermal_sensor.getFrame(frame)
-            return True, frame
-        except Exception:
-            return False, None
+            with thermal_lock:
+                if thermal_sensor is None:
+                    return False, None
+                thermal_sensor.getFrame(frame)
+            
+            # Validate frame data
+            if frame and len(frame) == thermal_shape[0] * thermal_shape[1]:
+                # Check for reasonable temperature values
+                if max(frame) > 0.0 and min(frame) >= -40.0:  # MLX90640 range is roughly -40 to 125°C
+                    return True, frame
+            
+            # If validation failed, retry
+            if retry < 2:
+                time.sleep(0.1)
+        except Exception as e:
+            if retry < 2:
+                time.sleep(0.1)
+            else:
+                # Log error occasionally to avoid spam
+                if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
+                    print(f"[Thermal] read_thermal_frame error: {e}")
+                    read_thermal_frame._last_error_log = time.time()
+    
+    return False, None
 
 
 def initialize_bme680_if_available() -> None:
@@ -697,8 +748,10 @@ def ensure_initialized() -> None:
     load_labels()
     load_symptoms_labels()
     initialize_camera_if_available()
-    initialize_thermal_if_available()
+    # Initialize BME680 first (working sensor), then thermal
     initialize_bme680_if_available()
+    time.sleep(1.0)  # Give I2C bus time to stabilize
+    initialize_thermal_if_available()
     initialize_detector_if_available()
     initialize_symptoms_detector()
     # Start symptoms worker thread
@@ -1084,14 +1137,36 @@ def colormap_thermal(values: list[float]) -> "np.ndarray | None":
 
 
 def generate_thermal_stream():
+    # Initial check
     ok, frame_vals = read_thermal_frame()
     if not ok or frame_vals is None:
-        return
+        # Try to reinitialize once
+        try:
+            initialize_thermal_if_available()
+            time.sleep(1.0)
+            ok, frame_vals = read_thermal_frame()
+            if not ok or frame_vals is None:
+                return
+        except Exception:
+            return
+    
+    consecutive_failures = 0
     while True:
         ok, frame_vals = read_thermal_frame()
         if not ok or frame_vals is None:
+            consecutive_failures += 1
+            if consecutive_failures > 10:
+                # Try to reinitialize after 10 consecutive failures
+                try:
+                    initialize_thermal_if_available()
+                    time.sleep(1.0)
+                    consecutive_failures = 0
+                except Exception:
+                    pass
             time.sleep(0.25)
             continue
+        
+        consecutive_failures = 0  # Reset on success
         # Hotspot detection (no UI alert)
         try:
             ambient_avg = sum(frame_vals) / len(frame_vals)
@@ -1207,10 +1282,48 @@ def camera_feed():
 
 @app.route("/thermal_feed")
 def thermal_feed():
-    if thermal_sensor is None:
-        return jsonify({"error": "sensor offline"}), 503
+    with thermal_lock:
+        if thermal_sensor is None:
+            # Try to reinitialize if sensor is lost
+            try:
+                initialize_thermal_if_available()
+            except Exception:
+                pass
+            with thermal_lock:
+                if thermal_sensor is None:
+                    return jsonify({"error": "sensor offline"}), 503
     return Response(stream_with_context(generate_thermal_stream()),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/thermal_status")
+def thermal_status():
+    """Check thermal sensor status."""
+    with thermal_lock:
+        sensor = thermal_sensor
+    if sensor is None:
+        return jsonify({"status": "offline", "reason": "sensor not initialized"})
+    
+    # Try to read a test frame
+    try:
+        test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
+        sensor.getFrame(test_frame)
+        if test_frame and len(test_frame) == thermal_shape[0] * thermal_shape[1]:
+            ambient = sum(test_frame) / len(test_frame)
+            max_temp = max(test_frame)
+            min_temp = min(test_frame)
+            return jsonify({
+                "status": "online",
+                "ambient_temp": round(float(ambient), 2),
+                "max_temp": round(float(max_temp), 2),
+                "min_temp": round(float(min_temp), 2),
+                "shape": thermal_shape,
+                "refresh_rate": "8 Hz"
+            })
+        else:
+            return jsonify({"status": "error", "reason": "invalid frame data"})
+    except Exception as e:
+        return jsonify({"status": "error", "reason": str(e)})
 
 
 @app.route("/sensor_data")
