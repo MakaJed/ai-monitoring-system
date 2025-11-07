@@ -116,7 +116,7 @@ latest_frame_bgr = None  # type: ignore
 thermal_lock = threading.Lock()
 thermal_sensor = None  # type: ignore
 thermal_shape = (24, 32)  # MLX90640 default
-thermal_refresh_rate_hz = 8.0  # Default to 8 Hz (like old system)
+thermal_refresh_rate_hz = 4.0  # Optimized for 4 Hz stability
 last_valid_thermal_frame = None  # Buffer to prevent black screens
 
 bme680_lock = threading.Lock()
@@ -643,7 +643,7 @@ def release_camera() -> None:
 def initialize_thermal_if_available() -> None:
     """
     Initialize MLX90640 thermal sensor using shared I2C bus (like old system).
-    Simplified initialization: 400kHz, direct 8Hz, minimal delays.
+    Optimized initialization: 400kHz, 4Hz focus, minimal delays for speed.
     """
     global thermal_sensor, shared_i2c_bus, thermal_refresh_rate_hz, last_valid_thermal_frame
     
@@ -667,50 +667,27 @@ def initialize_thermal_if_available() -> None:
                     sensor = adafruit_mlx90640.MLX90640(shared_i2c_bus)
                     print("[Thermal] Sensor object created")
                     
-                    # Try 8 Hz first, fall back to 4 Hz if it fails (hardware-dependent)
-                    rates_to_try = [
-                        (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, 8.0, "8 Hz"),
-                        (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, 4.0, "4 Hz"),
-                    ]
-                    
-                    sensor_initialized = False
-                    final_rate = 4.0  # Default fallback
+                    # Focus on 4 Hz only - optimized for speed and stability
                     global thermal_refresh_rate_hz
-                    for rate_enum, rate_val, rate_name in rates_to_try:
-                        try:
-                            sensor.refresh_rate = rate_enum
-                            print(f"[Thermal] Refresh rate set to {rate_name}")
-                            time.sleep(0.5)  # Let sensor adjust
-                            
-                            # Quick test: try one read to see if rate works
-                            test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
-                            time.sleep(0.2)  # Wait for frame
-                            sensor.getFrame(test_frame)
-                            
-                            # If we got here, this rate works!
-                            final_rate = rate_val
-                            thermal_sensor = sensor
-                            last_valid_thermal_frame = filter_outlier_pixels(test_frame, thermal_shape)
-                            print(f"[Thermal] ✓ MLX90640 initialized at {rate_name}")
-                            print("[Thermal] Outlier pixel filtering enabled")
-                            sensor_initialized = True
-                            break
-                        except RuntimeError as e:
-                            if "too many retries" in str(e).lower():
-                                print(f"[Thermal] {rate_name} failed: Too many retries - trying lower rate...")
-                                continue
-                            else:
-                                raise
-                        except Exception as e:
-                            print(f"[Thermal] {rate_name} failed: {e} - trying lower rate...")
-                            continue
-                    
-                    if not sensor_initialized:
-                        print("[Thermal] Failed to initialize at any refresh rate")
+                    try:
+                        sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_4_HZ
+                        print("[Thermal] Refresh rate set to 4 Hz")
+                        time.sleep(0.3)  # Reduced delay for faster initialization
+                        
+                        # Quick test read
+                        test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
+                        time.sleep(0.15)  # Reduced wait time
+                        sensor.getFrame(test_frame)
+                        
+                        # Success!
+                        thermal_sensor = sensor
+                        thermal_refresh_rate_hz = 4.0
+                        last_valid_thermal_frame = filter_outlier_pixels(test_frame, thermal_shape)
+                        print("[Thermal] ✓ MLX90640 initialized at 4 Hz (optimized)")
+                        print("[Thermal] Outlier pixel filtering enabled")
+                    except Exception as e:
+                        print(f"[Thermal] 4 Hz initialization failed: {e}")
                         thermal_sensor = None
-                    else:
-                        # Update global refresh rate to actual working rate
-                        thermal_refresh_rate_hz = final_rate
                 except RuntimeError as e:
                     error_msg = str(e)
                     if "outlier pixels" in error_msg.lower():
@@ -719,11 +696,11 @@ def initialize_thermal_if_available() -> None:
                         print("[Thermal] Attempting to use sensor anyway (outlier filtering will handle it)...")
                         try:
                             sensor = adafruit_mlx90640.MLX90640(shared_i2c_bus)
-                            sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
-                            thermal_refresh_rate_hz = 8.0
-                            time.sleep(0.5)  # Let sensor adjust
+                            sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_4_HZ
+                            thermal_refresh_rate_hz = 4.0
+                            time.sleep(0.3)  # Reduced delay
                             thermal_sensor = sensor
-                            print("[Thermal] Sensor initialized despite outlier pixels warning")
+                            print("[Thermal] Sensor initialized at 4 Hz despite outlier pixels warning")
                         except Exception as e2:
                             print(f"[Thermal] Failed to initialize: {e2}")
                             thermal_sensor = None
@@ -796,9 +773,9 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
                 return True, last_valid_thermal_frame.copy()
             return False, None
     
-    # Simple retry logic (like old system) - but with outlier filtering
-    # At 8 Hz, frames come every 125ms, so we need to wait appropriately
-    for retry in range(3):  # Only 3 retries (like old system simplicity)
+    # Optimized retry logic for 4 Hz - faster processing
+    # At 4 Hz, frames come every 250ms, optimized for speed
+    for retry in range(2):  # Reduced retries for speed
         try:
             frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
             with thermal_lock:
@@ -806,8 +783,9 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
                     if last_valid_thermal_frame is not None:
                         return True, last_valid_thermal_frame.copy()
                     return False, None
-                # At 8 Hz, frames come every 125ms - don't wait on retry 0 (let it happen naturally)
-                # Only wait on retries if we got "too many retries" error
+                # At 4 Hz, frames come every 250ms - minimal wait for speed
+                if retry > 0:
+                    time.sleep(0.05)  # Short delay only on retry
                 thermal_sensor.getFrame(frame)
             
             # Filter outlier pixels (keeps this improvement)
@@ -1384,11 +1362,11 @@ def generate_thermal_stream():
             return
     
     consecutive_failures = 0
-    # Calculate minimum time between frames based on refresh rate
-    # At 8 Hz, frames come every 125ms; we need to wait at least this long
-    frame_interval = 1.0 / thermal_refresh_rate_hz  # 0.125s for 8 Hz
-    # Use 1.2x interval to ensure frame is ready (like old system timing)
-    min_wait = max(frame_interval * 1.2, 0.15)  # At least 150ms for 8 Hz
+    # Calculate minimum time between frames - optimized for 4 Hz speed
+    # At 4 Hz, frames come every 250ms; optimized timing for faster updates
+    frame_interval = 1.0 / thermal_refresh_rate_hz  # 0.25s for 4 Hz
+    # Use 1.1x interval for speed (faster than 1.2x) - keep up with visible cam
+    min_wait = max(frame_interval * 1.1, 0.2)  # At least 200ms for 4 Hz, optimized
     
     while True:
         ok, frame_vals = read_thermal_frame()
@@ -1399,9 +1377,9 @@ def generate_thermal_stream():
                 try:
                     initialize_thermal_if_available()
                     time.sleep(1.0)
-                    # Recalculate frame interval in case refresh rate changed
+                    # Recalculate frame interval for 4 Hz
                     frame_interval = 1.0 / thermal_refresh_rate_hz
-                    multiplier = 1.15 if thermal_refresh_rate_hz >= 8.0 else 1.2
+                    multiplier = 1.1  # Optimized for 4 Hz speed
                     min_wait = max(frame_interval * multiplier, 0.12)
                     consecutive_failures = 0
                 except Exception:
@@ -1655,7 +1633,7 @@ def thermal_status():
                 "max_temp": round(float(max_temp), 2),
                 "min_temp": round(float(min_temp), 2),
                 "shape": thermal_shape,
-                "refresh_rate": "8 Hz"
+                "refresh_rate": "4 Hz"
             })
         else:
             return jsonify({"status": "error", "reason": "invalid frame data"})
