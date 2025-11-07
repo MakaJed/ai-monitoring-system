@@ -661,9 +661,14 @@ def initialize_thermal_if_available() -> None:
                     thermal_refresh_rate_hz = 8.0
                     print("[Thermal] Refresh rate set to 8 Hz")
                     
+                    # Small delay to let sensor adjust to new refresh rate
+                    time.sleep(0.5)
+                    
                     # Quick test read to verify it works
                     test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
                     try:
+                        # Try reading with a small delay (sensor needs time between reads at 8 Hz)
+                        time.sleep(0.15)  # Wait for first frame to be ready
                         sensor.getFrame(test_frame)
                         # Filter outlier pixels
                         test_frame = filter_outlier_pixels(test_frame, thermal_shape)
@@ -701,6 +706,7 @@ def initialize_thermal_if_available() -> None:
                             sensor = adafruit_mlx90640.MLX90640(shared_i2c_bus)
                             sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
                             thermal_refresh_rate_hz = 8.0
+                            time.sleep(0.5)  # Let sensor adjust
                             thermal_sensor = sensor
                             print("[Thermal] Sensor initialized despite outlier pixels warning")
                         except Exception as e2:
@@ -776,6 +782,7 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
             return False, None
     
     # Simple retry logic (like old system) - but with outlier filtering
+    # At 8 Hz, frames come every 125ms, so we need to wait appropriately
     for retry in range(3):  # Only 3 retries (like old system simplicity)
         try:
             frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
@@ -784,6 +791,9 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
                     if last_valid_thermal_frame is not None:
                         return True, last_valid_thermal_frame.copy()
                     return False, None
+                # At 8 Hz, wait a bit before reading to ensure frame is ready
+                if retry == 0:
+                    time.sleep(0.15)  # Wait for frame to be ready at 8 Hz
                 thermal_sensor.getFrame(frame)
             
             # Filter outlier pixels (keeps this improvement)
@@ -1358,12 +1368,10 @@ def generate_thermal_stream():
     
     consecutive_failures = 0
     # Calculate minimum time between frames based on refresh rate
-    # At 8 Hz, frames come every 125ms; at 16 Hz, every 62.5ms
-    # We need to wait at least this long between reads
-    frame_interval = 1.0 / thermal_refresh_rate_hz
-    # For 8 Hz, use 1.15x interval for smoother operation; for others use 1.2x
-    multiplier = 1.15 if thermal_refresh_rate_hz >= 8.0 else 1.2
-    min_wait = max(frame_interval * multiplier, 0.12)  # At least frame interval * multiplier, minimum 120ms
+    # At 8 Hz, frames come every 125ms; we need to wait at least this long
+    frame_interval = 1.0 / thermal_refresh_rate_hz  # 0.125s for 8 Hz
+    # Use 1.2x interval to ensure frame is ready (like old system timing)
+    min_wait = max(frame_interval * 1.2, 0.15)  # At least 150ms for 8 Hz
     
     while True:
         ok, frame_vals = read_thermal_frame()
