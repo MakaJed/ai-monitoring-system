@@ -116,6 +116,7 @@ latest_frame_bgr = None  # type: ignore
 thermal_lock = threading.Lock()
 thermal_sensor = None  # type: ignore
 thermal_shape = (24, 32)  # MLX90640 default
+thermal_refresh_rate_hz = 4.0  # Default, will be updated during init
 
 bme680_lock = threading.Lock()
 bme680_sensor = None  # type: ignore
@@ -635,12 +636,8 @@ def initialize_thermal_if_available() -> None:
     for attempt in range(3):
         try:
             print(f"[Thermal] Attempt {attempt + 1}/3...")
-            # Create I2C bus with lower frequency for stability
-            # 100 kHz is slower but more stable (reduces "Too many retries" errors)
-            # If too slow for 8 Hz, try 200 kHz as compromise
-            i2c_freq = int(os.getenv("THERMAL_I2C_FREQ", "100000"))  # Default 100 kHz
-            print(f"[Thermal] Using I2C frequency: {i2c_freq/1000:.0f} kHz")
-            i2c = busio.I2C(board.SCL, board.SDA, frequency=i2c_freq)
+            # Create I2C bus with longer stabilization
+            i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
             time.sleep(1.0)  # Give I2C bus more time to stabilize
             
             print("[Thermal] Creating MLX90640 sensor instance...")
@@ -663,7 +660,7 @@ def initialize_thermal_if_available() -> None:
                             try:
                                 i2c.deinit()
                                 time.sleep(1.0)
-                                i2c = busio.I2C(board.SCL, board.SDA, frequency=i2c_freq)
+                                i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
                                 time.sleep(1.0)
                             except:
                                 pass
@@ -694,97 +691,75 @@ def initialize_thermal_if_available() -> None:
             
             print("[Thermal] Sensor object ready")
             
-            # Try refresh rates from highest to lowest
-            # For 8 Hz (which used to work), we'll trust it like the old code did
-            # Only test if it's a higher rate (16 Hz) or lower fallback (4 Hz, 2 Hz)
+            # Try refresh rates from highest to lowest (want fastest that works)
+            # MLX90640 supports: 0.5, 1, 2, 4, 8, 16 Hz (32/64 Hz often unstable)
             refresh_rates = [
-                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz", True),   # Test this one
-                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz", False),    # Trust it (old code approach)
-                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz", True),    # Test fallback
-                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz", True),    # Test fallback
+                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz", 5.0, 25),  # Needs longest stabilization
+                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz", 4.0, 20),
+                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz", 3.0, 15),
+                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz", 2.0, 10),
             ]
             
             sensor_working = False
-            test_frame = None
-            
-            for rate, rate_name, should_test in refresh_rates:
+            for rate, rate_name, settle_time, max_retries in refresh_rates:
                 try:
-                    print(f"[Thermal] Setting refresh rate to {rate_name}...")
+                    print(f"[Thermal] Trying {rate_name} refresh rate...")
                     sensor.refresh_rate = rate
+                    print(f"[Thermal] Stabilizing sensor for {settle_time}s at {rate_name}...")
+                    time.sleep(settle_time)  # Critical: longer delays for higher refresh rates
                     
-                    # Wait time depends on rate - higher rates need more time
-                    wait_time = 2.5 if rate_name == "16 Hz" else (2.0 if rate_name == "8 Hz" else 1.5)
-                    print(f"[Thermal] Waiting {wait_time}s for sensor to stabilize...")
-                    time.sleep(wait_time)
+                    # Calculate minimum time between frames for this refresh rate
+                    # At 8 Hz, frames come every 125ms; at 16 Hz, every 62.5ms
+                    # We need to wait at least this long between reads
+                    frame_interval = 1.0 / float(rate_name.split()[0])  # e.g., "8 Hz" -> 0.125s
+                    min_wait = max(frame_interval * 1.5, 0.2)  # At least 1.5x frame interval, minimum 200ms
                     
-                    if not should_test:
-                        # For 8 Hz, trust it like old code did - no aggressive testing
-                        print(f"[Thermal] Using {rate_name} (trusted, like old code)")
-                        sensor_working = True
-                        # Wait longer for 8 Hz to stabilize - especially with 100 kHz I2C
-                        print(f"[Thermal] Waiting 3.0s for {rate_name} to fully stabilize...")
-                        time.sleep(3.0)  # Increased from 1.0 to 3.0
-                        # Try one read, but don't fail if it doesn't work immediately
-                        test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
-                        read_success = False
-                        for validation_attempt in range(3):
-                            try:
-                                sensor.getFrame(test_frame)
-                                max_temp = max(test_frame)
-                                min_temp = min(test_frame)
-                                if max_temp > -10.0 and min_temp >= -40.0:
-                                    print(f"[Thermal] ✓ {rate_name} validated: min={min_temp:.1f}°C, max={max_temp:.1f}°C")
-                                    read_success = True
-                                    break
-                                else:
-                                    print(f"[Thermal] Validation attempt {validation_attempt + 1}/3: invalid temps (min={min_temp:.1f}°C, max={max_temp:.1f}°C)")
-                            except Exception as e:
-                                print(f"[Thermal] Validation attempt {validation_attempt + 1}/3 failed: {e}")
-                            if validation_attempt < 2:
-                                time.sleep(1.0)
-                        
-                        if not read_success:
-                            # Even if validation fails, trust it (old code approach)
-                            # The sensor will work once it stabilizes during runtime
-                            print(f"[Thermal] Note: Initial read had issues, but trusting {rate_name} (will stabilize during runtime)")
-                            # Create a dummy valid frame for validation check
-                            test_frame = [25.0] * (thermal_shape[0] * thermal_shape[1])  # Dummy room temp
-                        break
-                    else:
-                        # For other rates, do a simple test
-                        print(f"[Thermal] Testing {rate_name}...")
-                        test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
-                        
-                        for test_attempt in range(2):  # Just 2 attempts, not aggressive
-                            try:
-                                sensor.getFrame(test_frame)
-                                sensor_working = True
-                                print(f"[Thermal] ✓ {rate_name} working!")
-                                break
-                            except RuntimeError as e:
-                                if "too many retries" in str(e).lower():
-                                    if test_attempt < 1:
-                                        time.sleep(1.0)
-                                    else:
-                                        print(f"[Thermal] {rate_name} not stable, trying next rate...")
-                                        break
+                    # Now test with proper timing
+                    print(f"[Thermal] Testing {rate_name} (waiting {min_wait*1000:.0f}ms between reads)...")
+                    test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
+                    
+                    for frame_retry in range(max_retries):
+                        try:
+                            sensor.getFrame(test_frame)
+                            # Success
+                            sensor_working = True
+                            print(f"[Thermal] ✓ Frame read successful with {rate_name} (attempt {frame_retry + 1}/{max_retries})")
+                            break
+                        except RuntimeError as e:
+                            error_msg = str(e)
+                            if "too many retries" in error_msg.lower():
+                                if frame_retry < max_retries - 1:
+                                    # Wait longer - at least the frame interval plus some buffer
+                                    delay = min_wait * (1.5 + frame_retry * 0.3)  # Progressive delay
+                                    if frame_retry % 3 == 0:  # Log every 3rd attempt
+                                        print(f"[Thermal] Retry {frame_retry + 1}/{max_retries} (waiting {delay*1000:.0f}ms)...")
+                                    time.sleep(delay)
                                 else:
                                     raise
-                            except Exception as e:
-                                if test_attempt < 1:
-                                    time.sleep(0.5)
-                                else:
-                                    break
-                        
-                        if sensor_working:
-                            break
+                            else:
+                                raise
+                        except Exception as e:
+                            if frame_retry < max_retries - 1:
+                                time.sleep(min_wait)
+                            else:
+                                raise
+                    
+                    if sensor_working:
+                        print(f"[Thermal] ✓✓ {rate_name} confirmed working!")
+                        # Store the refresh rate for use in stream generator
+                        global thermal_refresh_rate_hz
+                        thermal_refresh_rate_hz = float(rate_name.split()[0])
+                        break
                 except Exception as e:
-                    print(f"[Thermal] {rate_name} failed: {e}, trying next rate...")
-                    time.sleep(0.5)
+                    print(f"[Thermal] ✗ {rate_name} failed after all retries: {e}")
+                    if rate == refresh_rates[-1][0]:
+                        raise
+                    # Reset sensor state before trying next rate
+                    time.sleep(1.0)
                     continue
             
             if not sensor_working:
-                print("[Thermal] All refresh rates failed during initialization")
+                print("[Thermal] All refresh rates failed")
                 i2c.deinit()
                 time.sleep(3.0)
                 continue
@@ -848,8 +823,8 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
         if thermal_sensor is None:
             return False, None
     
-    # Retry up to 15 times if read fails (MLX90640 needs more attempts with 100 kHz I2C)
-    for retry in range(15):
+    # Retry up to 10 times if read fails (MLX90640 often needs multiple attempts)
+    for retry in range(10):
         try:
             frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
             with thermal_lock:
@@ -859,34 +834,28 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
             
             # Validate frame data
             if frame and len(frame) == thermal_shape[0] * thermal_shape[1]:
-                # Check for reasonable temperature values (allow slightly negative for cold environments)
-                max_temp = max(frame)
-                min_temp = min(frame)
-                if max_temp > -10.0 and min_temp >= -40.0:  # More lenient check
+                # Check for reasonable temperature values
+                if max(frame) > 0.0 and min(frame) >= -40.0:  # MLX90640 range is roughly -40 to 125°C
                     return True, frame
             
-            # If validation failed, retry with longer delay (100 kHz I2C is slower)
-            if retry < 14:
-                # Longer delays for slower I2C - give sensor more time
-                delay = 0.3 + (retry * 0.15)  # 0.3s to 2.4s
-                time.sleep(delay)
+            # If validation failed, retry with longer delay
+            if retry < 9:
+                time.sleep(0.2 if retry < 3 else 0.5)  # Longer delays after first few attempts
         except RuntimeError as e:
             # "Too many retries" from MLX90640 - wait longer before retry
             if "too many retries" in str(e).lower() or "retry" in str(e).lower():
-                if retry < 14:
-                    # With 100 kHz I2C, need longer delays
-                    delay = 0.5 + (retry * 0.2)  # 0.5s to 3.3s
-                    time.sleep(delay)
+                if retry < 9:
+                    time.sleep(0.3 + (retry * 0.1))  # Progressive delay
                 else:
                     # Log error occasionally to avoid spam
                     if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
-                        print(f"[Thermal] Persistent read error after 15 retries: {e}")
+                        print(f"[Thermal] Persistent read error after 10 retries: {e}")
                         read_thermal_frame._last_error_log = time.time()
             else:
                 raise
         except Exception as e:
-            if retry < 14:
-                time.sleep(0.3 + (retry * 0.1))  # Progressive delay
+            if retry < 9:
+                time.sleep(0.2)
             else:
                 # Log error occasionally to avoid spam
                 if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
@@ -1331,53 +1300,47 @@ def colormap_thermal(values: list[float]) -> "np.ndarray | None":
 
 
 def generate_thermal_stream():
-    # Initial check - wait longer for sensor to stabilize after init
-    print("[Thermal Stream] Starting thermal stream generator...")
+    # Initial check
     ok, frame_vals = read_thermal_frame()
     if not ok or frame_vals is None:
         # Try to reinitialize once
-        print("[Thermal Stream] Initial read failed, reinitializing...")
         try:
             initialize_thermal_if_available()
-            # Wait longer for sensor to stabilize - especially important with 100 kHz I2C
-            time.sleep(3.0)  # Increased from 1.0 to 3.0
+            time.sleep(1.0)
             ok, frame_vals = read_thermal_frame()
             if not ok or frame_vals is None:
-                print("[Thermal Stream] Reinit failed, cannot start stream")
                 return
-            else:
-                print(f"[Thermal Stream] Reinit successful, got frame: min={min(frame_vals):.1f}°C, max={max(frame_vals):.1f}°C")
-        except Exception as e:
-            print(f"[Thermal Stream] Reinit exception: {e}")
+        except Exception:
             return
-    else:
-        print(f"[Thermal Stream] Initial read successful: min={min(frame_vals):.1f}°C, max={max(frame_vals):.1f}°C")
     
     consecutive_failures = 0
+    # Calculate minimum time between frames based on refresh rate
+    # At 8 Hz, frames come every 125ms; at 16 Hz, every 62.5ms
+    # We need to wait at least this long between reads
+    frame_interval = 1.0 / thermal_refresh_rate_hz
+    min_wait = max(frame_interval * 1.2, 0.15)  # At least 1.2x frame interval, minimum 150ms
+    
     while True:
         ok, frame_vals = read_thermal_frame()
         if not ok or frame_vals is None:
             consecutive_failures += 1
-            if consecutive_failures == 5:  # Log after 5 failures
-                print(f"[Thermal Stream] Warning: {consecutive_failures} consecutive read failures")
             if consecutive_failures > 10:
                 # Try to reinitialize after 10 consecutive failures
-                print("[Thermal Stream] Too many failures, attempting reinit...")
                 try:
                     initialize_thermal_if_available()
-                    time.sleep(3.0)  # Longer wait after reinit (increased from 2.0)
+                    time.sleep(1.0)
+                    # Recalculate frame interval in case refresh rate changed
+                    frame_interval = 1.0 / thermal_refresh_rate_hz
+                    min_wait = max(frame_interval * 1.2, 0.15)
                     consecutive_failures = 0
-                    print("[Thermal Stream] Reinit complete, resuming reads...")
-                except Exception as e:
-                    print(f"[Thermal Stream] Reinit failed: {e}")
-            # Wait longer between failed reads - sensor needs time at 8 Hz
-            time.sleep(0.2)  # 200ms delay for failed reads
+                except Exception:
+                    pass
+            time.sleep(min_wait)
             continue
         
         consecutive_failures = 0  # Reset on success
-        # At 8 Hz, sensor updates every 125ms. With 100 kHz I2C, allow more time
-        # Wait at least 150ms between successful reads to avoid reading too fast
-        time.sleep(0.15)
+        # Wait before next read to respect frame timing
+        time.sleep(min_wait)
         # Hotspot detection (no UI alert)
         try:
             ambient_avg = sum(frame_vals) / len(frame_vals)
@@ -1398,28 +1361,8 @@ def generate_thermal_stream():
 
         colored = colormap_thermal(frame_vals)
         if colored is None:
-            # Log the issue and try to create a fallback visualization
-            if not hasattr(generate_thermal_stream, '_colormap_error_log') or time.time() - generate_thermal_stream._colormap_error_log > 10:
-                print(f"[Thermal Stream] Colormap failed for frame: min={min(frame_vals):.1f}°C, max={max(frame_vals):.1f}°C, len={len(frame_vals)}")
-                generate_thermal_stream._colormap_error_log = time.time()
-            # Create a simple grayscale fallback if colormap fails
-            try:
-                if np is not None and cv2 is not None:
-                    arr = np.array(frame_vals, dtype=np.float32).reshape(thermal_shape)
-                    min_v, max_v = np.min(arr), np.max(arr)
-                    if max_v - min_v < 1e-6:
-                        max_v = min_v + 1.0
-                    norm = ((arr - min_v) / (max_v - min_v) * 255.0).astype(np.uint8)
-                    colored = cv2.applyColorMap(norm, cv2.COLORMAP_HOT)  # Try different colormap
-                    if colored is None:
-                        time.sleep(0.1)
-                        continue
-                else:
-                    time.sleep(0.1)
-                    continue
-            except Exception:
-                time.sleep(0.1)
-                continue
+            time.sleep(0.1)
+            continue
         # Flip horizontally to match visible orientation
         try:
             colored = cv2.flip(colored, 1)
