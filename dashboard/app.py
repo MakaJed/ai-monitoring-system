@@ -663,10 +663,10 @@ def initialize_thermal_if_available() -> None:
                     ]
                     
                     sensor_initialized = False
+                    final_rate = 4.0  # Default fallback
                     for rate_enum, rate_val, rate_name in rates_to_try:
                         try:
                             sensor.refresh_rate = rate_enum
-                            thermal_refresh_rate_hz = rate_val
                             print(f"[Thermal] Refresh rate set to {rate_name}")
                             time.sleep(0.5)  # Let sensor adjust
                             
@@ -676,6 +676,7 @@ def initialize_thermal_if_available() -> None:
                             sensor.getFrame(test_frame)
                             
                             # If we got here, this rate works!
+                            final_rate = rate_val
                             thermal_sensor = sensor
                             last_valid_thermal_frame = filter_outlier_pixels(test_frame, thermal_shape)
                             print(f"[Thermal] ✓ MLX90640 initialized at {rate_name}")
@@ -695,6 +696,9 @@ def initialize_thermal_if_available() -> None:
                     if not sensor_initialized:
                         print("[Thermal] Failed to initialize at any refresh rate")
                         thermal_sensor = None
+                    else:
+                        # Update global refresh rate to actual working rate
+                        thermal_refresh_rate_hz = final_rate
                 except RuntimeError as e:
                     error_msg = str(e)
                     if "outlier pixels" in error_msg.lower():
