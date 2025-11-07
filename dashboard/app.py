@@ -635,8 +635,12 @@ def initialize_thermal_if_available() -> None:
     for attempt in range(3):
         try:
             print(f"[Thermal] Attempt {attempt + 1}/3...")
-            # Create I2C bus with longer stabilization
-            i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+            # Create I2C bus with lower frequency for stability
+            # 100 kHz is slower but more stable (reduces "Too many retries" errors)
+            # If too slow for 8 Hz, try 200 kHz as compromise
+            i2c_freq = int(os.getenv("THERMAL_I2C_FREQ", "100000"))  # Default 100 kHz
+            print(f"[Thermal] Using I2C frequency: {i2c_freq/1000:.0f} kHz")
+            i2c = busio.I2C(board.SCL, board.SDA, frequency=i2c_freq)
             time.sleep(1.0)  # Give I2C bus more time to stabilize
             
             print("[Thermal] Creating MLX90640 sensor instance...")
@@ -659,7 +663,7 @@ def initialize_thermal_if_available() -> None:
                             try:
                                 i2c.deinit()
                                 time.sleep(1.0)
-                                i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+                                i2c = busio.I2C(board.SCL, board.SDA, frequency=i2c_freq)
                                 time.sleep(1.0)
                             except:
                                 pass
