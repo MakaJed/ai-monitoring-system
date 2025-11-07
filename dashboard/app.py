@@ -641,14 +641,53 @@ def initialize_thermal_if_available() -> None:
             
             print("[Thermal] Creating MLX90640 sensor instance...")
             sensor = adafruit_mlx90640.MLX90640(i2c)
-            sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
-            print("[Thermal] Refresh rate set, waiting for sensor...")
-            time.sleep(2.0)  # Longer delay for sensor to initialize
+            print("[Thermal] Sensor object created")
             
-            # Test read to verify it works
-            print("[Thermal] Testing frame read...")
-            test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
-            sensor.getFrame(test_frame)
+            # Try different refresh rates if 8Hz fails
+            refresh_rates = [
+                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz"),
+                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz"),
+                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz"),
+            ]
+            
+            sensor_working = False
+            for rate, rate_name in refresh_rates:
+                try:
+                    print(f"[Thermal] Trying {rate_name} refresh rate...")
+                    sensor.refresh_rate = rate
+                    time.sleep(2.0)  # Give sensor time to adjust
+                    
+                    # Test read with multiple retries (MLX90640 often needs this)
+                    print("[Thermal] Testing frame read with retries...")
+                    test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
+                    
+                    for frame_retry in range(5):
+                        try:
+                            sensor.getFrame(test_frame)
+                            # Success
+                            sensor_working = True
+                            print(f"[Thermal] Frame read successful with {rate_name}")
+                            break
+                        except RuntimeError as e:
+                            if frame_retry < 4:
+                                print(f"[Thermal] Frame read retry {frame_retry + 1}/5: {e}")
+                                time.sleep(0.5)
+                            else:
+                                raise
+                    
+                    if sensor_working:
+                        break
+                except Exception as e:
+                    print(f"[Thermal] {rate_name} failed: {e}")
+                    if rate == refresh_rates[-1][0]:
+                        raise
+                    continue
+            
+            if not sensor_working:
+                print("[Thermal] All refresh rates failed")
+                i2c.deinit()
+                time.sleep(3.0)
+                continue
             
             if test_frame and len(test_frame) == thermal_shape[0] * thermal_shape[1]:
                 # Check if we got valid temperature values (not all zeros)
