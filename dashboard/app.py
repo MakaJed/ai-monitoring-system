@@ -721,14 +721,29 @@ def initialize_thermal_if_available() -> None:
                         # For 8 Hz, trust it like old code did - no aggressive testing
                         print(f"[Thermal] Using {rate_name} (trusted, like old code)")
                         sensor_working = True
-                        # Wait a bit longer for 8 Hz to stabilize before any read attempt
-                        time.sleep(1.0)
+                        # Wait longer for 8 Hz to stabilize - especially with 100 kHz I2C
+                        print(f"[Thermal] Waiting 3.0s for {rate_name} to fully stabilize...")
+                        time.sleep(3.0)  # Increased from 1.0 to 3.0
                         # Try one read, but don't fail if it doesn't work immediately
                         test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
-                        try:
-                            sensor.getFrame(test_frame)
-                            print(f"[Thermal] ✓ {rate_name} validated")
-                        except:
+                        read_success = False
+                        for validation_attempt in range(3):
+                            try:
+                                sensor.getFrame(test_frame)
+                                max_temp = max(test_frame)
+                                min_temp = min(test_frame)
+                                if max_temp > -10.0 and min_temp >= -40.0:
+                                    print(f"[Thermal] ✓ {rate_name} validated: min={min_temp:.1f}°C, max={max_temp:.1f}°C")
+                                    read_success = True
+                                    break
+                                else:
+                                    print(f"[Thermal] Validation attempt {validation_attempt + 1}/3: invalid temps (min={min_temp:.1f}°C, max={max_temp:.1f}°C)")
+                            except Exception as e:
+                                print(f"[Thermal] Validation attempt {validation_attempt + 1}/3 failed: {e}")
+                            if validation_attempt < 2:
+                                time.sleep(1.0)
+                        
+                        if not read_success:
                             # Even if validation fails, trust it (old code approach)
                             # The sensor will work once it stabilizes during runtime
                             print(f"[Thermal] Note: Initial read had issues, but trusting {rate_name} (will stabilize during runtime)")
@@ -1316,32 +1331,45 @@ def colormap_thermal(values: list[float]) -> "np.ndarray | None":
 
 
 def generate_thermal_stream():
-    # Initial check
+    # Initial check - wait longer for sensor to stabilize after init
+    print("[Thermal Stream] Starting thermal stream generator...")
     ok, frame_vals = read_thermal_frame()
     if not ok or frame_vals is None:
         # Try to reinitialize once
+        print("[Thermal Stream] Initial read failed, reinitializing...")
         try:
             initialize_thermal_if_available()
-            time.sleep(1.0)
+            # Wait longer for sensor to stabilize - especially important with 100 kHz I2C
+            time.sleep(3.0)  # Increased from 1.0 to 3.0
             ok, frame_vals = read_thermal_frame()
             if not ok or frame_vals is None:
+                print("[Thermal Stream] Reinit failed, cannot start stream")
                 return
-        except Exception:
+            else:
+                print(f"[Thermal Stream] Reinit successful, got frame: min={min(frame_vals):.1f}°C, max={max(frame_vals):.1f}°C")
+        except Exception as e:
+            print(f"[Thermal Stream] Reinit exception: {e}")
             return
+    else:
+        print(f"[Thermal Stream] Initial read successful: min={min(frame_vals):.1f}°C, max={max(frame_vals):.1f}°C")
     
     consecutive_failures = 0
     while True:
         ok, frame_vals = read_thermal_frame()
         if not ok or frame_vals is None:
             consecutive_failures += 1
+            if consecutive_failures == 5:  # Log after 5 failures
+                print(f"[Thermal Stream] Warning: {consecutive_failures} consecutive read failures")
             if consecutive_failures > 10:
                 # Try to reinitialize after 10 consecutive failures
+                print("[Thermal Stream] Too many failures, attempting reinit...")
                 try:
                     initialize_thermal_if_available()
-                    time.sleep(2.0)  # Longer wait after reinit
+                    time.sleep(3.0)  # Longer wait after reinit (increased from 2.0)
                     consecutive_failures = 0
-                except Exception:
-                    pass
+                    print("[Thermal Stream] Reinit complete, resuming reads...")
+                except Exception as e:
+                    print(f"[Thermal Stream] Reinit failed: {e}")
             # Wait longer between failed reads - sensor needs time at 8 Hz
             time.sleep(0.2)  # 200ms delay for failed reads
             continue
@@ -1370,8 +1398,28 @@ def generate_thermal_stream():
 
         colored = colormap_thermal(frame_vals)
         if colored is None:
-            time.sleep(0.1)
-            continue
+            # Log the issue and try to create a fallback visualization
+            if not hasattr(generate_thermal_stream, '_colormap_error_log') or time.time() - generate_thermal_stream._colormap_error_log > 10:
+                print(f"[Thermal Stream] Colormap failed for frame: min={min(frame_vals):.1f}°C, max={max(frame_vals):.1f}°C, len={len(frame_vals)}")
+                generate_thermal_stream._colormap_error_log = time.time()
+            # Create a simple grayscale fallback if colormap fails
+            try:
+                if np is not None and cv2 is not None:
+                    arr = np.array(frame_vals, dtype=np.float32).reshape(thermal_shape)
+                    min_v, max_v = np.min(arr), np.max(arr)
+                    if max_v - min_v < 1e-6:
+                        max_v = min_v + 1.0
+                    norm = ((arr - min_v) / (max_v - min_v) * 255.0).astype(np.uint8)
+                    colored = cv2.applyColorMap(norm, cv2.COLORMAP_HOT)  # Try different colormap
+                    if colored is None:
+                        time.sleep(0.1)
+                        continue
+                else:
+                    time.sleep(0.1)
+                    continue
+            except Exception:
+                time.sleep(0.1)
+                continue
         # Flip horizontally to match visible orientation
         try:
             colored = cv2.flip(colored, 1)
