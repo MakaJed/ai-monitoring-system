@@ -11,7 +11,7 @@ tflite-runtime; platform_machine == "aarch64" or platform_machine == "armv7l"
 # Install TensorFlow only on Linux non-ARM (avoid Windows/mac issues)
 tensorflow==2.16.1; platform_system == "Linux" and platform_machine != "aarch64" and platform_machine != "armv7l"
 
-adafruit-circuitpython-mlx90640==1.3.6
+adafruit-circuitpython-mlx90640==1.2.10  # Pinned: newer versions (1.3.x) have stricter timing that may prevent 8Hz
 adafruit-circuitpython-bme680==3.7.13
 adafruit-blinka==8.38.0
 matplotlib==3.9.0
