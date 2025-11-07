@@ -833,8 +833,8 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
         if thermal_sensor is None:
             return False, None
     
-    # Retry up to 10 times if read fails (MLX90640 often needs multiple attempts)
-    for retry in range(10):
+    # Retry up to 15 times if read fails (MLX90640 needs more attempts with 100 kHz I2C)
+    for retry in range(15):
         try:
             frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
             with thermal_lock:
@@ -844,28 +844,34 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
             
             # Validate frame data
             if frame and len(frame) == thermal_shape[0] * thermal_shape[1]:
-                # Check for reasonable temperature values
-                if max(frame) > 0.0 and min(frame) >= -40.0:  # MLX90640 range is roughly -40 to 125°C
+                # Check for reasonable temperature values (allow slightly negative for cold environments)
+                max_temp = max(frame)
+                min_temp = min(frame)
+                if max_temp > -10.0 and min_temp >= -40.0:  # More lenient check
                     return True, frame
             
-            # If validation failed, retry with longer delay
-            if retry < 9:
-                time.sleep(0.2 if retry < 3 else 0.5)  # Longer delays after first few attempts
+            # If validation failed, retry with longer delay (100 kHz I2C is slower)
+            if retry < 14:
+                # Longer delays for slower I2C - give sensor more time
+                delay = 0.3 + (retry * 0.15)  # 0.3s to 2.4s
+                time.sleep(delay)
         except RuntimeError as e:
             # "Too many retries" from MLX90640 - wait longer before retry
             if "too many retries" in str(e).lower() or "retry" in str(e).lower():
-                if retry < 9:
-                    time.sleep(0.3 + (retry * 0.1))  # Progressive delay
+                if retry < 14:
+                    # With 100 kHz I2C, need longer delays
+                    delay = 0.5 + (retry * 0.2)  # 0.5s to 3.3s
+                    time.sleep(delay)
                 else:
                     # Log error occasionally to avoid spam
                     if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
-                        print(f"[Thermal] Persistent read error after 10 retries: {e}")
+                        print(f"[Thermal] Persistent read error after 15 retries: {e}")
                         read_thermal_frame._last_error_log = time.time()
             else:
                 raise
         except Exception as e:
-            if retry < 9:
-                time.sleep(0.2)
+            if retry < 14:
+                time.sleep(0.3 + (retry * 0.1))  # Progressive delay
             else:
                 # Log error occasionally to avoid spam
                 if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
@@ -1332,14 +1338,18 @@ def generate_thermal_stream():
                 # Try to reinitialize after 10 consecutive failures
                 try:
                     initialize_thermal_if_available()
-                    time.sleep(1.0)
+                    time.sleep(2.0)  # Longer wait after reinit
                     consecutive_failures = 0
                 except Exception:
                     pass
-            time.sleep(0.25)
+            # Wait longer between failed reads - sensor needs time at 8 Hz
+            time.sleep(0.2)  # 200ms delay for failed reads
             continue
         
         consecutive_failures = 0  # Reset on success
+        # At 8 Hz, sensor updates every 125ms. With 100 kHz I2C, allow more time
+        # Wait at least 150ms between successful reads to avoid reading too fast
+        time.sleep(0.15)
         # Hotspot detection (no UI alert)
         try:
             ambient_avg = sum(frame_vals) / len(frame_vals)
