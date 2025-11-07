@@ -656,7 +656,7 @@ def initialize_thermal_if_available() -> None:
                     sensor = adafruit_mlx90640.MLX90640(shared_i2c_bus)
                     print("[Thermal] Sensor object created")
                     
-                    # Set 8 Hz directly (like old system) - no complex testing
+                    # Set 8 Hz directly (like old system) - no test read (let first read happen naturally)
                     sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
                     thermal_refresh_rate_hz = 8.0
                     print("[Thermal] Refresh rate set to 8 Hz")
@@ -664,38 +664,11 @@ def initialize_thermal_if_available() -> None:
                     # Small delay to let sensor adjust to new refresh rate
                     time.sleep(0.5)
                     
-                    # Quick test read to verify it works
-                    test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
-                    try:
-                        # Try reading with a small delay (sensor needs time between reads at 8 Hz)
-                        time.sleep(0.15)  # Wait for first frame to be ready
-                        sensor.getFrame(test_frame)
-                        # Filter outlier pixels
-                        test_frame = filter_outlier_pixels(test_frame, thermal_shape)
-                        
-                        max_temp = max(test_frame)
-                        min_temp = min(test_frame)
-                        avg_temp = sum(test_frame) / len(test_frame)
-                        
-                        if max_temp > 10.0 and min_temp >= -40.0:
-                            thermal_sensor = sensor
-                            last_valid_thermal_frame = test_frame.copy()
-                            print(f"[Thermal] ✓ MLX90640 initialized successfully at 8 Hz!")
-                            print(f"[Thermal] Test frame: min={min_temp:.1f}°C, max={max_temp:.1f}°C, avg={avg_temp:.1f}°C")
-                            print(f"[Thermal] Outlier pixel filtering enabled")
-                        else:
-                            print(f"[Thermal] Warning: Invalid test frame values (min: {min_temp:.1f}°C, max: {max_temp:.1f}°C)")
-                            # Still use sensor, but log warning
-                            thermal_sensor = sensor
-                            last_valid_thermal_frame = test_frame.copy()
-                    except RuntimeError as e:
-                        # If test read fails, try to use sensor anyway (might work on next read)
-                        if "outlier pixels" in str(e).lower():
-                            print(f"[Thermal] Warning: Outlier pixels detected, but continuing...")
-                            thermal_sensor = sensor
-                        else:
-                            print(f"[Thermal] Test read failed: {e}, but sensor created - will retry on first frame read")
-                            thermal_sensor = sensor
+                    # Don't test read - just use sensor (like old system)
+                    # First actual read will happen when stream starts
+                    thermal_sensor = sensor
+                    print("[Thermal] ✓ MLX90640 initialized at 8 Hz (first frame will be read when stream starts)")
+                    print("[Thermal] Outlier pixel filtering enabled")
                 except RuntimeError as e:
                     error_msg = str(e)
                     if "outlier pixels" in error_msg.lower():
@@ -791,9 +764,8 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
                     if last_valid_thermal_frame is not None:
                         return True, last_valid_thermal_frame.copy()
                     return False, None
-                # At 8 Hz, wait a bit before reading to ensure frame is ready
-                if retry == 0:
-                    time.sleep(0.15)  # Wait for frame to be ready at 8 Hz
+                # At 8 Hz, frames come every 125ms - don't wait on retry 0 (let it happen naturally)
+                # Only wait on retries if we got "too many retries" error
                 thermal_sensor.getFrame(frame)
             
             # Filter outlier pixels (keeps this improvement)
