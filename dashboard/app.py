@@ -798,8 +798,8 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
         if thermal_sensor is None:
             return False, None
     
-    # Retry up to 3 times if read fails
-    for retry in range(3):
+    # Retry up to 10 times if read fails (MLX90640 often needs multiple attempts)
+    for retry in range(10):
         try:
             frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
             with thermal_lock:
@@ -813,12 +813,24 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
                 if max(frame) > 0.0 and min(frame) >= -40.0:  # MLX90640 range is roughly -40 to 125°C
                     return True, frame
             
-            # If validation failed, retry
-            if retry < 2:
-                time.sleep(0.1)
+            # If validation failed, retry with longer delay
+            if retry < 9:
+                time.sleep(0.2 if retry < 3 else 0.5)  # Longer delays after first few attempts
+        except RuntimeError as e:
+            # "Too many retries" from MLX90640 - wait longer before retry
+            if "too many retries" in str(e).lower() or "retry" in str(e).lower():
+                if retry < 9:
+                    time.sleep(0.3 + (retry * 0.1))  # Progressive delay
+                else:
+                    # Log error occasionally to avoid spam
+                    if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
+                        print(f"[Thermal] Persistent read error after 10 retries: {e}")
+                        read_thermal_frame._last_error_log = time.time()
+            else:
+                raise
         except Exception as e:
-            if retry < 2:
-                time.sleep(0.1)
+            if retry < 9:
+                time.sleep(0.2)
             else:
                 # Log error occasionally to avoid spam
                 if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
