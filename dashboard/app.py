@@ -691,46 +691,72 @@ def initialize_thermal_if_available() -> None:
             print("[Thermal] Sensor object ready")
             
             # Try refresh rates from highest to lowest (want fastest that works)
-            # MLX90640 supports: 0.5, 1, 2, 4, 8, 16, 32, 64 Hz
-            # Higher = faster updates, but some sensors can't handle 16Hz+
+            # MLX90640 supports: 0.5, 1, 2, 4, 8, 16 Hz (32/64 Hz often unstable)
             refresh_rates = [
-                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz"),  # Fastest commonly supported
-                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz"),
-                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz"),
-                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz"),
+                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz", 5.0, 25),  # Needs longest stabilization
+                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz", 4.0, 20),
+                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz", 3.0, 15),
+                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz", 2.0, 10),
             ]
             
             sensor_working = False
-            for rate, rate_name in refresh_rates:
+            for rate, rate_name, settle_time, max_retries in refresh_rates:
                 try:
                     print(f"[Thermal] Trying {rate_name} refresh rate...")
                     sensor.refresh_rate = rate
-                    time.sleep(2.0)  # Give sensor time to adjust
+                    print(f"[Thermal] Stabilizing sensor for {settle_time}s at {rate_name}...")
+                    time.sleep(settle_time)  # Critical: longer delays for higher refresh rates
                     
-                    # Test read with multiple retries (MLX90640 often needs this)
-                    print("[Thermal] Testing frame read with retries...")
+                    # Flush first few frames (they're often invalid)
+                    print(f"[Thermal] Flushing initial frames...")
+                    flush_count = 5 if rate_name in ["16 Hz", "8 Hz"] else 3
+                    for flush in range(flush_count):
+                        try:
+                            dummy = [0.0] * (thermal_shape[0] * thermal_shape[1])
+                            sensor.getFrame(dummy)
+                            time.sleep(0.5 if rate_name in ["16 Hz", "8 Hz"] else 0.3)
+                        except:
+                            time.sleep(0.5)
+                    
+                    # Now test for real
+                    print(f"[Thermal] Testing {rate_name} with up to {max_retries} retries...")
                     test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
                     
-                    for frame_retry in range(5):
+                    for frame_retry in range(max_retries):
                         try:
                             sensor.getFrame(test_frame)
                             # Success
                             sensor_working = True
-                            print(f"[Thermal] Frame read successful with {rate_name}")
+                            print(f"[Thermal] ✓ Frame read successful with {rate_name} (attempt {frame_retry + 1}/{max_retries})")
                             break
                         except RuntimeError as e:
-                            if frame_retry < 4:
-                                print(f"[Thermal] Frame read retry {frame_retry + 1}/5: {e}")
+                            error_msg = str(e)
+                            if "too many retries" in error_msg.lower():
+                                if frame_retry < max_retries - 1:
+                                    # Progressive delay: start small, increase if needed
+                                    delay = 0.3 + (frame_retry * 0.1)  # 0.3s → 1.7s
+                                    if frame_retry % 3 == 0:  # Log every 3rd attempt
+                                        print(f"[Thermal] Retry {frame_retry + 1}/{max_retries} (waiting {delay:.1f}s)...")
+                                    time.sleep(delay)
+                                else:
+                                    raise
+                            else:
+                                raise
+                        except Exception as e:
+                            if frame_retry < max_retries - 1:
                                 time.sleep(0.5)
                             else:
                                 raise
                     
                     if sensor_working:
+                        print(f"[Thermal] ✓✓ {rate_name} confirmed working!")
                         break
                 except Exception as e:
-                    print(f"[Thermal] {rate_name} failed: {e}")
+                    print(f"[Thermal] ✗ {rate_name} failed after all retries: {e}")
                     if rate == refresh_rates[-1][0]:
                         raise
+                    # Reset sensor state before trying next rate
+                    time.sleep(1.0)
                     continue
             
             if not sensor_working:
