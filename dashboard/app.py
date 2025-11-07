@@ -145,6 +145,13 @@ CALIBRATION_OFFSET_Y = 0  # pixels to shift boxes vertically (placeholder)
 OVERLAY_ALERT_SECONDS = 5.0
 DETECTION_OVERLAY_SECONDS = 3.0
 
+# Chicken health temperature thresholds (based on poultry physiology)
+CHICKEN_TEMP_NORMAL_MIN = 40.6  # °C - lower bound of normal body temperature
+CHICKEN_TEMP_NORMAL_MAX = 43.0  # °C - upper bound of normal body temperature
+CHICKEN_TEMP_FEVER_THRESHOLD = 43.0  # °C - above this is considered fever
+CHICKEN_TEMP_COLD_THRESHOLD = 40.0  # °C - below this is considered hypothermia
+HEALTH_ALERT_DURATION_SEC = 30.0  # Alert if abnormal temp sustained for this duration
+
 # Recent alert state
 last_alert_time = 0.0
 last_alert_message = ""
@@ -176,6 +183,10 @@ sym_results_lock = threading.Lock()
 latest_symptom_overlays = []  # list of {x1,y1,x2,y2,score,label}
 latest_symptoms_ts = 0.0
 last_symptom_alert_ts = {}
+
+# Chicken health tracking (for sustained alert detection)
+chicken_health_lock = threading.Lock()
+chicken_health_tracking = {}  # dict: (x1,y1,x2,y2) -> {"temp": float, "status": str, "first_seen": float, "last_seen": float}
 
 # Camera configuration via environment
 CAMERA_PROVIDER = os.getenv("CAMERA_PROVIDER", "picamera2").lower()  # picamera2|v4l2
@@ -1432,6 +1443,27 @@ def generate_thermal_stream():
         except Exception:
             pass
 
+        # Helper: assess chicken health based on temperature
+        def assess_chicken_health(temp_c: float) -> tuple[str, tuple[int, int, int]]:
+            """
+            Assess chicken health status based on temperature.
+            Returns: (status_label, bgr_color)
+            - Normal: 40.6-43.0°C (green)
+            - Fever: >43.0°C (red)
+            - Cold: <40.0°C (blue)
+            - Unstable: 40.0-40.6°C (yellow)
+            """
+            if temp_c is None:
+                return ("Unknown", (128, 128, 128))  # Gray
+            elif CHICKEN_TEMP_NORMAL_MIN <= temp_c <= CHICKEN_TEMP_NORMAL_MAX:
+                return ("Normal", (0, 255, 0))  # Green (BGR)
+            elif temp_c > CHICKEN_TEMP_FEVER_THRESHOLD:
+                return ("Fever", (0, 0, 255))  # Red (BGR)
+            elif temp_c < CHICKEN_TEMP_COLD_THRESHOLD:
+                return ("Cold", (255, 0, 0))  # Blue (BGR)
+            else:
+                return ("Unstable", (0, 255, 255))  # Yellow (BGR)
+        
         # Helper: compute approximate chicken temperature from thermal grid under a box
         def box_temperature_c(frame_values_list, x1p, y1p, x2p, y2p):
             try:
@@ -1479,13 +1511,71 @@ def generate_thermal_stream():
                         y2 = max(0, min(THERMAL_DISPLAY_HEIGHT - 1, int(vy2 * scale_y)))
                         cls_idx = d.get("class", -1)
                         label = labels[cls_idx] if 0 <= cls_idx < len(labels) else str(cls_idx)
-                        cv2.rectangle(colored, (x1, y1), (x2, y2), (255, 140, 0), 2)
-                        # For thermal overlay: show chicken temperature (max in box), no confidence
+                        # For thermal overlay: show chicken temperature with health status
                         temp_c = box_temperature_c(frame_vals, x1, y1, x2, y2)
                         if label.lower() == "chicken" and temp_c is not None:
-                            cv2.putText(colored, f"{label} {temp_c:.1f}C", (x1, max(12, y1 - 6)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 140, 0), 1, cv2.LINE_AA)
+                            # Assess health status
+                            health_status, health_color = assess_chicken_health(temp_c)
+                            
+                            # Use health color for bounding box
+                            cv2.rectangle(colored, (x1, y1), (x2, y2), health_color, 2)
+                            
+                            # Display with health status and emoji
+                            status_emoji = {
+                                "Normal": "✅",
+                                "Fever": "⚠️",
+                                "Cold": "❄️",
+                                "Unstable": "⚡",
+                                "Unknown": "❓"
+                            }.get(health_status, "❓")
+                            
+                            display_text = f"{label} {temp_c:.1f}°C {status_emoji} {health_status}"
+                            cv2.putText(colored, display_text, (x1, max(12, y1 - 6)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, health_color, 1, cv2.LINE_AA)
+                            
+                            # Track health for sustained alert detection
+                            box_key = (x1, y1, x2, y2)
+                            current_time = time.time()
+                            with chicken_health_lock:
+                                if box_key not in chicken_health_tracking:
+                                    chicken_health_tracking[box_key] = {
+                                        "temp": temp_c,
+                                        "status": health_status,
+                                        "first_seen": current_time,
+                                        "last_seen": current_time
+                                    }
+                                else:
+                                    # Update tracking
+                                    tracking = chicken_health_tracking[box_key]
+                                    if tracking["status"] == health_status:
+                                        # Same status - update last_seen
+                                        tracking["last_seen"] = current_time
+                                        tracking["temp"] = temp_c
+                                    else:
+                                        # Status changed - reset tracking
+                                        tracking["temp"] = temp_c
+                                        tracking["status"] = health_status
+                                        tracking["first_seen"] = current_time
+                                        tracking["last_seen"] = current_time
+                                    
+                                    # Check for sustained abnormal temperature
+                                    duration = current_time - tracking["first_seen"]
+                                    if duration >= HEALTH_ALERT_DURATION_SEC:
+                                        if health_status == "Fever":
+                                            alert_msg = f"Chicken fever detected: {temp_c:.1f}°C (sustained {duration:.0f}s)"
+                                            with alerts_lock:
+                                                alerts_queue.append(alert_msg)
+                                            # Reset to prevent spam
+                                            tracking["first_seen"] = current_time
+                                        elif health_status == "Cold":
+                                            alert_msg = f"Chicken hypothermia detected: {temp_c:.1f}°C (sustained {duration:.0f}s)"
+                                            with alerts_lock:
+                                                alerts_queue.append(alert_msg)
+                                            # Reset to prevent spam
+                                            tracking["first_seen"] = current_time
                         else:
+                            # Non-chicken detection - use default orange
+                            cv2.rectangle(colored, (x1, y1), (x2, y2), (255, 140, 0), 2)
                             cv2.putText(colored, f"{label}", (x1, max(12, y1 - 6)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 140, 0), 1, cv2.LINE_AA)
         except Exception:
@@ -1650,10 +1740,11 @@ def detect():
     except Exception:
         pass
 
-    # Thermal snapshot and ambient/hotspot (unchanged)
+    # Thermal snapshot and ambient/hotspot with health status
     thermal_colored = None
     amb = None
     hot = None
+    chicken_health_data = []  # List of health status for each detection
     ok_t, frame_vals = read_thermal_frame()
     if ok_t and frame_vals is not None:
         try:
@@ -1661,14 +1752,61 @@ def detect():
             hot = float(max(frame_vals))
             col = colormap_thermal(frame_vals)
             if col is not None:
-                # Overlay detections with calibration offset for saving
+                # Helper functions for health assessment
+                def assess_chicken_health_local(temp_c: float) -> tuple[str, tuple[int, int, int]]:
+                    if temp_c is None:
+                        return ("Unknown", (128, 128, 128))
+                    elif CHICKEN_TEMP_NORMAL_MIN <= temp_c <= CHICKEN_TEMP_NORMAL_MAX:
+                        return ("Normal", (0, 255, 0))
+                    elif temp_c > CHICKEN_TEMP_FEVER_THRESHOLD:
+                        return ("Fever", (0, 0, 255))
+                    elif temp_c < CHICKEN_TEMP_COLD_THRESHOLD:
+                        return ("Cold", (255, 0, 0))
+                    else:
+                        return ("Unstable", (0, 255, 255))
+                
+                def box_temperature_c_local(frame_values_list, x1p, y1p, x2p, y2p):
+                    try:
+                        if np is None:
+                            return None
+                        arr = np.array(frame_values_list, dtype=np.float32).reshape(thermal_shape)
+                        arr = arr[:, ::-1]  # Flip horizontally
+                        col1 = max(0, min(thermal_shape[1]-1, int(x1p / max(1, STREAM_WIDTH) * thermal_shape[1])))
+                        col2 = max(0, min(thermal_shape[1]-1, int(x2p / max(1, STREAM_WIDTH) * thermal_shape[1])))
+                        row1 = max(0, min(thermal_shape[0]-1, int(y1p / max(1, STREAM_HEIGHT) * thermal_shape[0])))
+                        row2 = max(0, min(thermal_shape[0]-1, int(y2p / max(1, STREAM_HEIGHT) * thermal_shape[0])))
+                        c1, c2 = sorted((col1, col2))
+                        r1, r2 = sorted((row1, row2))
+                        if r2 < r1 or c2 < c1:
+                            return None
+                        region = arr[r1:r2+1, c1:c2+1]
+                        if region.size == 0:
+                            return None
+                        return float(np.max(region))
+                    except Exception:
+                        return None
+                
+                # Overlay detections with calibration offset and health status
                 if cv2 is not None and dets:
                     for d in dets:
                         x1 = max(0, min(STREAM_WIDTH - 1, d["x1"] + CALIBRATION_OFFSET_X))
                         y1 = max(0, min(STREAM_HEIGHT - 1, d["y1"] + CALIBRATION_OFFSET_Y))
                         x2 = max(0, min(STREAM_WIDTH - 1, d["x2"] + CALIBRATION_OFFSET_X))
                         y2 = max(0, min(STREAM_HEIGHT - 1, d["y2"] + CALIBRATION_OFFSET_Y))
-                        cv2.rectangle(col, (x1, y1), (x2, y2), (255, 140, 0), 2)
+                        
+                        # Get temperature and health status
+                        temp_c = box_temperature_c_local(frame_vals, x1, y1, x2, y2)
+                        if temp_c is not None:
+                            health_status, health_color = assess_chicken_health_local(temp_c)
+                            cv2.rectangle(col, (x1, y1), (x2, y2), health_color, 2)
+                            # Store health data for JSON response
+                            chicken_health_data.append({
+                                "temp_c": round(temp_c, 1),
+                                "status": health_status,
+                                "x1": x1, "y1": y1, "x2": x2, "y2": y2
+                            })
+                        else:
+                            cv2.rectangle(col, (x1, y1), (x2, y2), (255, 140, 0), 2)
                 # Overlay symptoms (orange) if present
                 with sym_results_lock:
                     if latest_symptom_overlays and time.time() - latest_symptoms_ts <= DETECTION_OVERLAY_SECONDS:
@@ -1708,8 +1846,38 @@ def detect():
             if time_since_detection <= 5.0:  # Only use symptoms detected within last 5 seconds
                 current_symptoms = latest_symptom_overlays
     
+    # Calculate health status summary
+    health_summary = {
+        "normal": 0,
+        "fever": 0,
+        "cold": 0,
+        "unstable": 0,
+        "unknown": 0
+    }
+    for health in chicken_health_data:
+        status = health.get("status", "Unknown")
+        health_summary[status.lower()] = health_summary.get(status.lower(), 0) + 1
+    
+    # Determine if there are health abnormalities (fever or cold)
+    has_health_abnormality = health_summary["fever"] > 0 or health_summary["cold"] > 0
+    has_any_abnormality = bool(current_symptoms) or has_health_abnormality
+    
+    # Build health status notes
+    health_notes = []
+    if health_summary["fever"] > 0:
+        health_notes.append(f"{health_summary['fever']} fever")
+    if health_summary["cold"] > 0:
+        health_notes.append(f"{health_summary['cold']} hypothermia")
+    health_status_str = ", ".join(health_notes) if health_notes else ""
+    
     # Insert log row
     try:
+        notes_parts = ["detect"]
+        if health_status_str:
+            notes_parts.append(f"health: {health_status_str}")
+        if current_symptoms:
+            notes_parts.append(f"symptoms: {', '.join(sorted({s['label'] for s in current_symptoms}))}")
+        
         insert_log({
             "timestamp": ts_iso,
             "bme_temp": bme.get("temperature_c") if bme else None,
@@ -1719,23 +1887,42 @@ def detect():
             "thermal_hotspot_temp": hot,
             "ambient_temp": amb,
             "symptoms_detected": ", ".join(sorted({s["label"] for s in current_symptoms})) if current_symptoms else "",
-            "has_abnormality": bool(current_symptoms),
+            "has_abnormality": 1 if has_any_abnormality else 0,
             "image_path_visible": vis_path,
             "image_path_thermal": th_path,
-            "notes": "detect",
+            "notes": " | ".join(notes_parts),
         })
     except Exception:
         pass
 
+    # Enhance detections with health status
+    detections_with_health = []
+    for i, d in enumerate(dets):
+        det_dict = d.copy()
+        # Match health data by bounding box coordinates (approximate match)
+        for health in chicken_health_data:
+            # Check if detection box overlaps with health data box (within 20 pixels)
+            if (abs(d["x1"] - health["x1"]) < 20 and abs(d["y1"] - health["y1"]) < 20 and
+                abs(d["x2"] - health["x2"]) < 20 and abs(d["y2"] - health["y2"]) < 20):
+                det_dict["temp_c"] = health["temp_c"]
+                det_dict["health_status"] = health["status"]
+                break
+        else:
+            # No health data matched
+            det_dict["temp_c"] = None
+            det_dict["health_status"] = "Unknown"
+        detections_with_health.append(det_dict)
+    
     return jsonify({
         "status": "online",
-        "detections": dets,
+        "detections": detections_with_health,
         "symptoms": current_symptoms,
         "labels": labels,
         "symptom_labels": sym_labels,
         "saved_visible": vis_path,
         "saved_thermal": th_path,
         "abnormal": bool(current_symptoms),
+        "health_data": chicken_health_data,  # Raw health data for reference
     })
 
 
