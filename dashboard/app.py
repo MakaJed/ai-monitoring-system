@@ -116,11 +116,12 @@ latest_frame_bgr = None  # type: ignore
 thermal_lock = threading.Lock()
 thermal_sensor = None  # type: ignore
 thermal_shape = (24, 32)  # MLX90640 default
-thermal_refresh_rate_hz = 4.0  # Default, will be updated during init
+thermal_refresh_rate_hz = 8.0  # Default to 8 Hz (like old system)
 last_valid_thermal_frame = None  # Buffer to prevent black screens
 
 bme680_lock = threading.Lock()
 bme680_sensor = None  # type: ignore
+shared_i2c_bus = None  # Shared I2C bus for both sensors (like old system)
 
 detector_lock = threading.Lock()
 tflite_interpreter = None  # type: ignore
@@ -629,194 +630,92 @@ def release_camera() -> None:
 
 
 def initialize_thermal_if_available() -> None:
-    global thermal_sensor
+    """
+    Initialize MLX90640 thermal sensor using shared I2C bus (like old system).
+    Simplified initialization: 400kHz, direct 8Hz, minimal delays.
+    """
+    global thermal_sensor, shared_i2c_bus, thermal_refresh_rate_hz, last_valid_thermal_frame
+    
     if adafruit_mlx90640 is None or board is None or busio is None:
         print("[Thermal] MLX90640 libraries not available")
         return
     
-    print("[Thermal] Initializing MLX90640 thermal sensor...")
-    print("[Thermal] Note: MLX90640 should be at I2C address 0x33")
+    if shared_i2c_bus is None:
+        print("[Thermal] ERROR: Shared I2C bus not initialized. Call initialize_bme680_if_available() first.")
+        return
     
-    for attempt in range(3):
-        try:
-            print(f"[Thermal] Attempt {attempt + 1}/3...")
-            # Create I2C bus - use 300kHz for better stability at higher refresh rates
-            i2c = busio.I2C(board.SCL, board.SDA, frequency=300000)
-            time.sleep(1.0)  # Give I2C bus more time to stabilize
-            
-            print("[Thermal] Creating MLX90640 sensor instance...")
-            
-            # Try to create sensor, handle outlier pixels error
-            sensor = None
-            for init_retry in range(5):
+    print("[Thermal] Initializing MLX90640 thermal sensor...")
+    print("[Thermal] Using shared I2C bus at 400kHz (like old system)")
+    
+    try:
+        with thermal_lock:
+            if thermal_sensor is None:
+                # Use shared I2C bus at 400kHz (like old system)
+                # Create sensor directly (simple, like old system)
                 try:
-                    sensor = adafruit_mlx90640.MLX90640(i2c)
-                    print("[Thermal] Sensor object created successfully")
-                    break
+                    sensor = adafruit_mlx90640.MLX90640(shared_i2c_bus)
+                    print("[Thermal] Sensor object created")
+                    
+                    # Set 8 Hz directly (like old system) - no complex testing
+                    sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
+                    thermal_refresh_rate_hz = 8.0
+                    print("[Thermal] Refresh rate set to 8 Hz")
+                    
+                    # Quick test read to verify it works
+                    test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
+                    try:
+                        sensor.getFrame(test_frame)
+                        # Filter outlier pixels
+                        test_frame = filter_outlier_pixels(test_frame, thermal_shape)
+                        
+                        max_temp = max(test_frame)
+                        min_temp = min(test_frame)
+                        avg_temp = sum(test_frame) / len(test_frame)
+                        
+                        if max_temp > 10.0 and min_temp >= -40.0:
+                            thermal_sensor = sensor
+                            last_valid_thermal_frame = test_frame.copy()
+                            print(f"[Thermal] ✓ MLX90640 initialized successfully at 8 Hz!")
+                            print(f"[Thermal] Test frame: min={min_temp:.1f}°C, max={max_temp:.1f}°C, avg={avg_temp:.1f}°C")
+                            print(f"[Thermal] Outlier pixel filtering enabled")
+                        else:
+                            print(f"[Thermal] Warning: Invalid test frame values (min: {min_temp:.1f}°C, max: {max_temp:.1f}°C)")
+                            # Still use sensor, but log warning
+                            thermal_sensor = sensor
+                            last_valid_thermal_frame = test_frame.copy()
+                    except RuntimeError as e:
+                        # If test read fails, try to use sensor anyway (might work on next read)
+                        if "outlier pixels" in str(e).lower():
+                            print(f"[Thermal] Warning: Outlier pixels detected, but continuing...")
+                            thermal_sensor = sensor
+                        else:
+                            print(f"[Thermal] Test read failed: {e}, but sensor created - will retry on first frame read")
+                            thermal_sensor = sensor
                 except RuntimeError as e:
                     error_msg = str(e)
                     if "outlier pixels" in error_msg.lower():
-                        print(f"[Thermal] Outlier pixels detected on attempt {init_retry + 1}/5")
-                        if init_retry < 4:
-                            print("[Thermal] This is common with MLX90640, retrying with delay...")
-                            time.sleep(2.0 + init_retry)  # Progressive delay
-                            # Try to reset I2C
-                            try:
-                                i2c.deinit()
-                                time.sleep(1.0)
-                                i2c = busio.I2C(board.SCL, board.SDA, frequency=300000)
-                                time.sleep(1.0)
-                            except:
-                                pass
-                        else:
-                            # Last attempt - try to continue anyway with warning
-                            print("[Thermal] WARNING: Outlier pixels persist. Sensor may have reduced accuracy.")
-                            print("[Thermal] Attempting to use sensor anyway...")
-                            try:
-                                # Force create sensor despite error by catching and ignoring
-                                sensor = adafruit_mlx90640.MLX90640(i2c)
-                            except:
-                                sensor = None
-                            break
-                    else:
-                        raise
-                except Exception as e:
-                    if init_retry < 4:
-                        print(f"[Thermal] Sensor creation attempt {init_retry + 1}/5 failed: {e}, retrying...")
-                        time.sleep(2.0)
-                    else:
-                        raise
-            
-            if sensor is None:
-                print("[Thermal] Failed to create sensor object")
-                i2c.deinit()
-                time.sleep(3.0)
-                continue
-            
-            print("[Thermal] Sensor object ready")
-            
-            # Try refresh rates from highest to lowest (want fastest that works)
-            # MLX90640 supports: 0.5, 1, 2, 4, 8, 16, 32, 64 Hz
-            # Higher = faster updates, but some sensors can't handle 16Hz+
-            # Prioritize 8 Hz for smooth operation
-            refresh_rates = [
-                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz"),  # Target: smooth 8 Hz
-                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz"),  # Try 16 Hz if 8 works
-                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz"),  # Fallback
-                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz"),  # Last resort
-            ]
-            
-            sensor_working = False
-            for rate, rate_name in refresh_rates:
-                try:
-                    print(f"[Thermal] Trying {rate_name} refresh rate...")
-                    sensor.refresh_rate = rate
-                    # Longer stabilization for higher refresh rates
-                    stabilization_time = 2.5 if "8" in rate_name or "16" in rate_name else 2.0
-                    time.sleep(stabilization_time)
-                    
-                    # Test read with multiple retries (MLX90640 often needs this)
-                    print("[Thermal] Testing frame read with retries...")
-                    test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
-                    
-                    # For 8 Hz and above, need more careful timing
-                    frame_retry_count = 8 if "8" in rate_name or "16" in rate_name else 5
-                    retry_delay = 0.15 if "8" in rate_name or "16" in rate_name else 0.5
-                    
-                    for frame_retry in range(frame_retry_count):
+                        # Outlier pixels error - try to continue anyway (like old system would)
+                        print(f"[Thermal] Warning: Outlier pixels detected during init: {e}")
+                        print("[Thermal] Attempting to use sensor anyway (outlier filtering will handle it)...")
                         try:
-                            sensor.getFrame(test_frame)
-                            # Filter outlier pixels on test frame
-                            test_frame = filter_outlier_pixels(test_frame, thermal_shape)
-                            # Validate test frame
-                            if max(test_frame) > 0.0 and min(test_frame) >= -40.0:
-                                sensor_working = True
-                                print(f"[Thermal] Frame read successful with {rate_name}")
-                                break
-                            else:
-                                raise RuntimeError("Invalid temperature values in test frame")
-                        except RuntimeError as e:
-                            if frame_retry < frame_retry_count - 1:
-                                error_msg = str(e)
-                                if "too many retries" not in error_msg.lower():
-                                    print(f"[Thermal] Frame read retry {frame_retry + 1}/{frame_retry_count}: {e}")
-                                time.sleep(retry_delay)
-                            else:
-                                raise
-                    
-                    if sensor_working:
-                        # Update global refresh rate
-                        global thermal_refresh_rate_hz
-                        thermal_refresh_rate_hz = float(rate_name.split()[0])
-                        break
+                            sensor = adafruit_mlx90640.MLX90640(shared_i2c_bus)
+                            sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
+                            thermal_refresh_rate_hz = 8.0
+                            thermal_sensor = sensor
+                            print("[Thermal] Sensor initialized despite outlier pixels warning")
+                        except Exception as e2:
+                            print(f"[Thermal] Failed to initialize: {e2}")
+                            thermal_sensor = None
+                    else:
+                        print(f"[Thermal] Initialization failed: {e}")
+                        thermal_sensor = None
                 except Exception as e:
-                    print(f"[Thermal] {rate_name} failed: {e}")
-                    if rate == refresh_rates[-1][0]:
-                        raise
-                    continue
-            
-            if not sensor_working:
-                print("[Thermal] All refresh rates failed")
-                i2c.deinit()
-                time.sleep(3.0)
-                continue
-            
-            if test_frame and len(test_frame) == thermal_shape[0] * thermal_shape[1]:
-                # Check if we got valid temperature values (not all zeros)
-                max_temp = max(test_frame)
-                min_temp = min(test_frame)
-                avg_temp = sum(test_frame) / len(test_frame)
-                
-                if max_temp > 10.0 and min_temp >= -40.0:  # Reasonable temperature check
-                    with thermal_lock:
-                        thermal_sensor = sensor
-                    # Initialize last valid frame buffer
-                    global last_valid_thermal_frame
-                    last_valid_thermal_frame = test_frame.copy()
-                    print(f"[Thermal] OK MLX90640 initialized successfully!")
-                    print(f"[Thermal] Test frame: min={min_temp:.1f}°C, max={max_temp:.1f}°C, avg={avg_temp:.1f}°C")
-                    print(f"[Thermal] Outlier pixel filtering enabled")
-                    return
-                else:
-                    print(f"[Thermal] Warning: Test frame has invalid values (min: {min_temp:.1f}°C, max: {max_temp:.1f}°C)")
-            else:
-                print(f"[Thermal] Warning: Test frame size mismatch (got {len(test_frame) if test_frame else 0}, expected {thermal_shape[0] * thermal_shape[1]})")
-            
-            # If we get here, test failed - try again
-            i2c.deinit()  # Clean up
-            time.sleep(3.0)
-        except Exception as e:
-            error_msg = str(e)
-            print(f"[Thermal] Init attempt {attempt + 1}/3 failed: {error_msg}")
-            
-            # Clean up I2C on error
-            try:
-                i2c.deinit()
-            except:
-                pass
-            
-            if attempt < 2:
-                print(f"[Thermal] Retrying in 3 seconds...")
-                time.sleep(3.0)
-            else:
-                print("[Thermal] FAIL MLX90640 initialization failed after 3 attempts")
-                print("[Thermal] ==========================================")
-                print("[Thermal] DIAGNOSIS: Sensor not detected on I2C bus")
-                print("[Thermal] ==========================================")
-                print("[Thermal] Troubleshooting checklist:")
-                print("[Thermal]   1. Check physical connections:")
-                print("[Thermal]      - VDD → 3.3V (pin 1)")
-                print("[Thermal]      - GND → Ground (pin 6)")
-                print("[Thermal]      - SCL → GPIO3/SCL (pin 5)")
-                print("[Thermal]      - SDA → GPIO2/SDA (pin 3)")
-                print("[Thermal]   2. Verify power: MLX90640 needs stable 3.3V")
-                print("[Thermal]   3. Check I2C is enabled: sudo raspi-config")
-                print("[Thermal]   4. Test manually: python3 dashboard/thermal_debug.py")
-                print("[Thermal]   5. Check wiring with multimeter if needed")
-                print("[Thermal] ==========================================")
-                print("[Thermal] App will continue without thermal sensor.")
-                with thermal_lock:
+                    print(f"[Thermal] Initialization failed: {e}")
                     thermal_sensor = None
+    except Exception as e:
+        print(f"[Thermal] Unexpected error during initialization: {e}")
+        with thermal_lock:
+            thermal_sensor = None
 
 
 def filter_outlier_pixels(frame: list[float], shape: tuple[int, int]) -> list[float]:
@@ -863,6 +762,10 @@ def filter_outlier_pixels(frame: list[float], shape: tuple[int, int]) -> list[fl
 
 
 def read_thermal_frame() -> tuple[bool, list[float] | None]:
+    """
+    Read thermal frame from MLX90640. Simplified retry logic (like old system).
+    Keeps outlier filtering and frame buffering for reliability.
+    """
     global last_valid_thermal_frame
     
     with thermal_lock:
@@ -872,8 +775,8 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
                 return True, last_valid_thermal_frame.copy()
             return False, None
     
-    # Retry up to 10 times if read fails (MLX90640 often needs multiple attempts)
-    for retry in range(10):
+    # Simple retry logic (like old system) - but with outlier filtering
+    for retry in range(3):  # Only 3 retries (like old system simplicity)
         try:
             frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
             with thermal_lock:
@@ -883,7 +786,7 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
                     return False, None
                 thermal_sensor.getFrame(frame)
             
-            # Filter outlier pixels
+            # Filter outlier pixels (keeps this improvement)
             frame = filter_outlier_pixels(frame, thermal_shape)
             
             # Validate frame data
@@ -894,19 +797,18 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
                     last_valid_thermal_frame = frame.copy()
                     return True, frame
             
-            # If validation failed, retry with longer delay
-            if retry < 9:
-                time.sleep(0.15 if retry < 3 else 0.4)  # Shorter delays for faster refresh rates
+            # If validation failed, retry with short delay
+            if retry < 2:
+                time.sleep(0.1)  # Short delay
         except RuntimeError as e:
-            # "Too many retries" from MLX90640 - wait longer before retry
+            # "Too many retries" from MLX90640
             if "too many retries" in str(e).lower() or "retry" in str(e).lower():
-                if retry < 9:
-                    # Progressive delay, but shorter for 8 Hz support
-                    time.sleep(0.2 + (retry * 0.05))
+                if retry < 2:
+                    time.sleep(0.15)  # Short delay before retry
                 else:
                     # Log error occasionally to avoid spam
                     if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
-                        print(f"[Thermal] Persistent read error after 10 retries: {e}")
+                        print(f"[Thermal] Read error after 3 retries: {e}")
                         read_thermal_frame._last_error_log = time.time()
                     # Return last valid frame if available
                     if last_valid_thermal_frame is not None:
@@ -914,8 +816,8 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
             else:
                 raise
         except Exception as e:
-            if retry < 9:
-                time.sleep(0.15)
+            if retry < 2:
+                time.sleep(0.1)
             else:
                 # Log error occasionally to avoid spam
                 if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
@@ -932,23 +834,33 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
 
 
 def initialize_bme680_if_available() -> None:
-    global bme680_sensor
+    """
+    Initialize BME680 sensor and create shared I2C bus for thermal sensor.
+    Uses 400kHz I2C frequency (like old system).
+    """
+    global bme680_sensor, shared_i2c_bus
     if adafruit_bme680 is None or board is None or busio is None:
         return
     try:
         with bme680_lock:
             if bme680_sensor is None:
-                i2c = busio.I2C(board.SCL, board.SDA)
+                # Create shared I2C bus at 400kHz (like old system)
+                if shared_i2c_bus is None:
+                    shared_i2c_bus = busio.I2C(board.SCL, board.SDA, frequency=400000)
+                    print("[BME680] Created shared I2C bus at 400kHz")
+                
                 # Try common I2C addresses: 0x76 and 0x77
                 for addr in (0x76, 0x77):
                     try:
-                        sensor = adafruit_bme680.Adafruit_BME680_I2C(i2c, address=addr)
+                        sensor = adafruit_bme680.Adafruit_BME680_I2C(shared_i2c_bus, address=addr)
                         sensor.sea_level_pressure = 1013.25
                         bme680_sensor = sensor
+                        print(f"[BME680] Initialized at address 0x{addr:02x}")
                         break
                     except Exception:
                         continue
-    except Exception:
+    except Exception as e:
+        print(f"[BME680] Initialization failed: {e}")
         with bme680_lock:
             bme680_sensor = None
 
@@ -977,9 +889,9 @@ def ensure_initialized() -> None:
     load_labels()
     load_symptoms_labels()
     initialize_camera_if_available()
-    # Initialize BME680 first (working sensor), then thermal
+    # Initialize BME680 first to create shared I2C bus, then thermal uses same bus
     initialize_bme680_if_available()
-    time.sleep(1.0)  # Give I2C bus time to stabilize
+    time.sleep(0.5)  # Short delay (like old system)
     initialize_thermal_if_available()
     initialize_detector_if_available()
     initialize_symptoms_detector()
