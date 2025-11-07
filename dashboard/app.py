@@ -1488,96 +1488,106 @@ def generate_thermal_stream():
             except Exception:
                 return None
 
-        # Overlay latest detections from visible camera, adjusted by calibration offsets and flip
+        # Overlay latest detections from visible camera - ONLY show boxes for detected chickens
+        # Thermal boxes should match visible camera boxes exactly (same detections, same time)
         try:
             now_ts = time.time()
             with latest_detections_lock:
+                # Only show boxes if detections are recent and valid
                 if now_ts - latest_detections_ts <= DETECTION_OVERLAY_SECONDS and latest_detections:
+                    # Filter to only process chicken detections
+                    chicken_detections = []
                     for d in latest_detections:
-                        # Start from visible coords
-                        vx1 = d["x1"] + CALIBRATION_OFFSET_X
-                        vy1 = d["y1"] + CALIBRATION_OFFSET_Y
-                        vx2 = d["x2"] + CALIBRATION_OFFSET_X
-                        vy2 = d["y2"] + CALIBRATION_OFFSET_Y
-                        # Mirror horizontally for flipped thermal and scale to thermal display size
-                        # Scale from visible camera size to thermal display size
-                        scale_x = THERMAL_DISPLAY_WIDTH / STREAM_WIDTH
-                        scale_y = THERMAL_DISPLAY_HEIGHT / STREAM_HEIGHT
-                        tx1 = THERMAL_DISPLAY_WIDTH - 1 - (vx2 * scale_x)
-                        tx2 = THERMAL_DISPLAY_WIDTH - 1 - (vx1 * scale_x)
-                        x1 = max(0, min(THERMAL_DISPLAY_WIDTH - 1, int(tx1)))
-                        y1 = max(0, min(THERMAL_DISPLAY_HEIGHT - 1, int(vy1 * scale_y)))
-                        x2 = max(0, min(THERMAL_DISPLAY_WIDTH - 1, int(tx2)))
-                        y2 = max(0, min(THERMAL_DISPLAY_HEIGHT - 1, int(vy2 * scale_y)))
                         cls_idx = d.get("class", -1)
                         label = labels[cls_idx] if 0 <= cls_idx < len(labels) else str(cls_idx)
-                        # For thermal overlay: show chicken temperature with health status
-                        temp_c = box_temperature_c(frame_vals, x1, y1, x2, y2)
-                        if label.lower() == "chicken" and temp_c is not None:
-                            # Assess health status
-                            health_status, health_color = assess_chicken_health(temp_c)
+                        # Only include detections that are actually chickens
+                        if label.lower() == "chicken":
+                            chicken_detections.append(d)
+                    
+                    # Only draw boxes if we have chicken detections
+                    if chicken_detections:
+                        for d in chicken_detections:
+                            # Start from visible coords
+                            vx1 = d["x1"] + CALIBRATION_OFFSET_X
+                            vy1 = d["y1"] + CALIBRATION_OFFSET_Y
+                            vx2 = d["x2"] + CALIBRATION_OFFSET_X
+                            vy2 = d["y2"] + CALIBRATION_OFFSET_Y
+                            # Mirror horizontally for flipped thermal and scale to thermal display size
+                            # Scale from visible camera size to thermal display size
+                            scale_x = THERMAL_DISPLAY_WIDTH / STREAM_WIDTH
+                            scale_y = THERMAL_DISPLAY_HEIGHT / STREAM_HEIGHT
+                            tx1 = THERMAL_DISPLAY_WIDTH - 1 - (vx2 * scale_x)
+                            tx2 = THERMAL_DISPLAY_WIDTH - 1 - (vx1 * scale_x)
+                            x1 = max(0, min(THERMAL_DISPLAY_WIDTH - 1, int(tx1)))
+                            y1 = max(0, min(THERMAL_DISPLAY_HEIGHT - 1, int(vy1 * scale_y)))
+                            x2 = max(0, min(THERMAL_DISPLAY_WIDTH - 1, int(tx2)))
+                            y2 = max(0, min(THERMAL_DISPLAY_HEIGHT - 1, int(vy2 * scale_y)))
                             
-                            # Use health color for bounding box
-                            cv2.rectangle(colored, (x1, y1), (x2, y2), health_color, 2)
+                            # Get temperature for this chicken detection
+                            temp_c = box_temperature_c(frame_vals, x1, y1, x2, y2)
                             
-                            # Display with health status and emoji
-                            status_emoji = {
-                                "Normal": "✅",
-                                "Fever": "⚠️",
-                                "Cold": "❄️",
-                                "Unstable": "⚡",
-                                "Unknown": "❓"
-                            }.get(health_status, "❓")
-                            
-                            display_text = f"{label} {temp_c:.1f}°C {status_emoji} {health_status}"
-                            cv2.putText(colored, display_text, (x1, max(12, y1 - 6)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, health_color, 1, cv2.LINE_AA)
-                            
-                            # Track health for sustained alert detection
-                            box_key = (x1, y1, x2, y2)
-                            current_time = time.time()
-                            with chicken_health_lock:
-                                if box_key not in chicken_health_tracking:
-                                    chicken_health_tracking[box_key] = {
-                                        "temp": temp_c,
-                                        "status": health_status,
-                                        "first_seen": current_time,
-                                        "last_seen": current_time
-                                    }
-                                else:
-                                    # Update tracking
-                                    tracking = chicken_health_tracking[box_key]
-                                    if tracking["status"] == health_status:
-                                        # Same status - update last_seen
-                                        tracking["last_seen"] = current_time
-                                        tracking["temp"] = temp_c
+                            # Only draw box if we have a valid temperature reading
+                            if temp_c is not None:
+                                # Assess health status
+                                health_status, health_color = assess_chicken_health(temp_c)
+                                
+                                # Use health color for bounding box (matches visible detection)
+                                cv2.rectangle(colored, (x1, y1), (x2, y2), health_color, 2)
+                                
+                                # Display with health status and emoji
+                                status_emoji = {
+                                    "Normal": "✅",
+                                    "Fever": "⚠️",
+                                    "Cold": "❄️",
+                                    "Unstable": "⚡",
+                                    "Unknown": "❓"
+                                }.get(health_status, "❓")
+                                
+                                display_text = f"Chicken {temp_c:.1f}°C {status_emoji} {health_status}"
+                                cv2.putText(colored, display_text, (x1, max(12, y1 - 6)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, health_color, 1, cv2.LINE_AA)
+                                
+                                # Track health for sustained alert detection
+                                box_key = (x1, y1, x2, y2)
+                                current_time = time.time()
+                                with chicken_health_lock:
+                                    if box_key not in chicken_health_tracking:
+                                        chicken_health_tracking[box_key] = {
+                                            "temp": temp_c,
+                                            "status": health_status,
+                                            "first_seen": current_time,
+                                            "last_seen": current_time
+                                        }
                                     else:
-                                        # Status changed - reset tracking
-                                        tracking["temp"] = temp_c
-                                        tracking["status"] = health_status
-                                        tracking["first_seen"] = current_time
-                                        tracking["last_seen"] = current_time
-                                    
-                                    # Check for sustained abnormal temperature
-                                    duration = current_time - tracking["first_seen"]
-                                    if duration >= HEALTH_ALERT_DURATION_SEC:
-                                        if health_status == "Fever":
-                                            alert_msg = f"Chicken fever detected: {temp_c:.1f}°C (sustained {duration:.0f}s)"
-                                            with alerts_lock:
-                                                alerts_queue.append(alert_msg)
-                                            # Reset to prevent spam
+                                        # Update tracking
+                                        tracking = chicken_health_tracking[box_key]
+                                        if tracking["status"] == health_status:
+                                            # Same status - update last_seen
+                                            tracking["last_seen"] = current_time
+                                            tracking["temp"] = temp_c
+                                        else:
+                                            # Status changed - reset tracking
+                                            tracking["temp"] = temp_c
+                                            tracking["status"] = health_status
                                             tracking["first_seen"] = current_time
-                                        elif health_status == "Cold":
-                                            alert_msg = f"Chicken hypothermia detected: {temp_c:.1f}°C (sustained {duration:.0f}s)"
-                                            with alerts_lock:
-                                                alerts_queue.append(alert_msg)
-                                            # Reset to prevent spam
-                                            tracking["first_seen"] = current_time
-                        else:
-                            # Non-chicken detection - use default orange
-                            cv2.rectangle(colored, (x1, y1), (x2, y2), (255, 140, 0), 2)
-                            cv2.putText(colored, f"{label}", (x1, max(12, y1 - 6)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 140, 0), 1, cv2.LINE_AA)
+                                            tracking["last_seen"] = current_time
+                                        
+                                        # Check for sustained abnormal temperature
+                                        duration = current_time - tracking["first_seen"]
+                                        if duration >= HEALTH_ALERT_DURATION_SEC:
+                                            if health_status == "Fever":
+                                                alert_msg = f"Chicken fever detected: {temp_c:.1f}°C (sustained {duration:.0f}s)"
+                                                with alerts_lock:
+                                                    alerts_queue.append(alert_msg)
+                                                # Reset to prevent spam
+                                                tracking["first_seen"] = current_time
+                                            elif health_status == "Cold":
+                                                alert_msg = f"Chicken hypothermia detected: {temp_c:.1f}°C (sustained {duration:.0f}s)"
+                                                with alerts_lock:
+                                                    alerts_queue.append(alert_msg)
+                                                # Reset to prevent spam
+                                                tracking["first_seen"] = current_time
+                            # If temp_c is None, don't draw anything (no thermal data available)
         except Exception:
             pass
 
