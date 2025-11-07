@@ -34,8 +34,8 @@
       <button id="btn-dashboard" class="btn">Dashboard</button>
       <a class="btn btn-outline" href="/logs">Logs</a>
       <div class="notifications notif-wrap">
-        <button id="notif-toggle" class="btn btn-outline" aria-label="Notifications">🔔</button>
-        <span id="notif-badge" class="badge">0</span>
+        <button id="notif-toggle" class="btn btn-outline btn-notif" aria-label="Notifications">🔔</button>
+        <span id="notif-badge" class="badge notif-badge-top">0</span>
         <div id="notif-menu" class="notif-menu">
           <div class="notif-header">Notifications <span id="notif-count"></span></div>
           <ul id="notif-list" class="notif-list"></ul>
@@ -63,8 +63,6 @@
         <h2 id="camera-title">Live Cameras</h2>
         <div class="panel-actions">
           <span id="model-status" class="badge badge-ok">Model: OK</span>
-        <button id="fs-visible" class="btn btn-outline">Fullscreen Visible</button>
-        <button id="fs-thermal" class="btn btn-outline">Fullscreen Thermal</button>
         </div>
       </div>
       <div id="alert-banner" class="alert-banner hidden">
@@ -73,11 +71,17 @@
       </div>
       <div id="split-area" class="split">
         <div class="split-stream">
-          <div class="split-title">Visible</div>
+          <div class="split-title">
+            <span>Visible</span>
+            <button id="fs-visible" class="btn-fullscreen" title="Fullscreen" aria-label="Fullscreen Visible">⛶</button>
+          </div>
           <img id="stream-visible" alt="Visible Stream" />
         </div>
         <div class="split-stream">
-          <div class="split-title">Thermal</div>
+          <div class="split-title">
+            <span>Thermal</span>
+            <button id="fs-thermal" class="btn-fullscreen" title="Fullscreen" aria-label="Fullscreen Thermal">⛶</button>
+          </div>
           <img id="stream-thermal" alt="Thermal Stream" />
         </div>
       </div>
@@ -122,11 +126,11 @@
   <!-- Bottom Analytics Section -->
   <section class="analytics">
     <h3>Historical Data &amp; Analytics</h3>
-    <div class="charts-grid" id="charts">
-      <div class="chart-card"><div class="chart-title">Temperature Trend (°C)</div><canvas id="chart-temp" width="560" height="220"></canvas></div>
-      <div class="chart-card"><div class="chart-title">Humidity (%) &amp; Gas (kΩ)</div><canvas id="chart-hg" width="560" height="220"></canvas></div>
-      <div class="chart-card"><div class="chart-title">Environment Status Summary</div><canvas id="chart-status" width="560" height="220"></canvas></div>
-      <div class="chart-card"><div class="chart-title">Symptom Detections Over Time</div><canvas id="chart-sym" width="560" height="220"></canvas></div>
+      <div class="charts-grid" id="charts">
+      <div class="chart-card"><div class="chart-title">Temperature Trend (°C)</div><canvas id="chart-temp" width="800" height="300"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Humidity (%) &amp; Gas (kΩ)</div><canvas id="chart-hg" width="800" height="300"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Environment Status Summary</div><canvas id="chart-status" width="800" height="300"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Symptom Detections Over Time</div><canvas id="chart-sym" width="800" height="300"></canvas></div>
     </div>
   </section>
 

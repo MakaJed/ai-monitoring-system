@@ -47,8 +47,8 @@
     const ctx = c.getContext('2d');
     ctx.clearRect(0,0,c.width,c.height);
     // title
-    ctx.fillStyle = '#292524'; ctx.font = '13px -apple-system, sans-serif'; ctx.fillText(title, 8, 18);
-    const pad = 30; const w = c.width - pad*2; const h = c.height - pad*2;
+    ctx.fillStyle = '#292524'; ctx.font = 'bold 16px -apple-system, sans-serif'; ctx.fillText(title, 12, 24);
+    const pad = 40; const w = c.width - pad*2; const h = c.height - pad*2 - 20;
     const xs = (i)=> pad + (w * i / Math.max(1, labels.length-1));
     const vals = data.filter(v=>v!=null);
     const min = Math.min(...vals, 0); const max = Math.max(...vals, 1);
@@ -70,16 +70,16 @@
       ctx.fillStyle = pc; ctx.beginPath(); ctx.arc(x,y,2,0,Math.PI*2); ctx.fill();
     });
     // x labels (sparse)
-    ctx.fillStyle = '#78716c'; ctx.font = '10px -apple-system, sans-serif';
-    labels.forEach((lab,i)=>{ if(i%Math.ceil(labels.length/8)!==0) return; const x=xs(i); ctx.fillText(lab, x-10, pad+h+12); });
+    ctx.fillStyle = '#78716c'; ctx.font = '12px -apple-system, sans-serif';
+    labels.forEach((lab,i)=>{ if(i%Math.ceil(labels.length/8)!==0) return; const x=xs(i); ctx.fillText(lab, x-15, pad+h+18); });
   }
 
   function drawBarChart(canvasId, labels, data, color, title){
     const c = document.getElementById(canvasId); if(!c) return;
     const ctx = c.getContext('2d');
     ctx.clearRect(0,0,c.width,c.height);
-    ctx.fillStyle = '#292524'; ctx.font = '13px -apple-system, sans-serif'; ctx.fillText(title, 8, 18);
-    const pad = 30; const w = c.width - pad*2; const h = c.height - pad*2;
+    ctx.fillStyle = '#292524'; ctx.font = 'bold 16px -apple-system, sans-serif'; ctx.fillText(title, 12, 24);
+    const pad = 40; const w = c.width - pad*2; const h = c.height - pad*2 - 20;
     const max = Math.max(1, ...data);
     const bw = Math.max(2, Math.floor(w / Math.max(1, data.length)) - 2);
     // axis
@@ -92,16 +92,16 @@
       ctx.fillRect(x, pad+h-bh, bw, bh);
     });
     // labels sparse
-    ctx.fillStyle = '#78716c'; ctx.font = '10px -apple-system, sans-serif';
-    labels.forEach((lab,i)=>{ if(i%Math.ceil(labels.length/8)!==0) return; const x = pad + i*(bw+2); ctx.fillText(lab, x, pad+h+12); });
+    ctx.fillStyle = '#78716c'; ctx.font = '12px -apple-system, sans-serif';
+    labels.forEach((lab,i)=>{ if(i%Math.ceil(labels.length/8)!==0) return; const x = pad + i*(bw+2); ctx.fillText(lab, x, pad+h+18); });
   }
 
   function drawDualAxis(canvasId, labels, dataL, dataR, colorL, colorR, labelL, labelR){
     const c = document.getElementById(canvasId); if(!c) return;
     const ctx = c.getContext('2d');
     ctx.clearRect(0,0,c.width,c.height);
-    ctx.fillStyle = '#111827'; ctx.font = '14px sans-serif'; ctx.fillText(`${labelL} & ${labelR}`, 8, 18);
-    const pad = 30; const w = c.width - pad*2; const h = c.height - pad*2;
+    ctx.fillStyle = '#292524'; ctx.font = 'bold 16px -apple-system, sans-serif'; ctx.fillText(`${labelL} & ${labelR}`, 12, 24);
+    const pad = 40; const w = c.width - pad*2; const h = c.height - pad*2 - 20;
     const xs = (i)=> pad + (w * i / Math.max(1, labels.length-1));
     const valsL = dataL.filter(v=>v!=null); const minL = Math.min(...valsL, 0); const maxL = Math.max(...valsL, 1);
     const valsR = dataR.filter(v=>v!=null); const minR = Math.min(...valsR, 0); const maxR = Math.max(...valsR, 1);
@@ -118,15 +118,15 @@
     dataR.forEach((v,i)=>{ if(v==null) return; const x=xs(i), y=ysR(v); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
     ctx.stroke(); ctx.setLineDash([]);
     // legend
-    ctx.fillStyle = '#64748b'; ctx.font = '11px sans-serif';
-    ctx.fillText(labelL, pad, pad-6); ctx.fillText(labelR, pad+120, pad-6);
+    ctx.fillStyle = '#78716c'; ctx.font = '13px -apple-system, sans-serif';
+    ctx.fillText(labelL, pad, pad-8); ctx.fillText(labelR, pad+140, pad-8);
   }
 
   function drawDonut(canvasId, values, colors, labels){
     const c = document.getElementById(canvasId); if(!c) return;
     const ctx = c.getContext('2d');
     ctx.clearRect(0,0,c.width,c.height);
-    const cx = c.width/2, cy = c.height/2, r = Math.min(c.width,c.height)/2 - 20;
+    const cx = c.width/2, cy = c.height/2 - 10, r = Math.min(c.width,c.height)/2 - 30;
     const total = values.reduce((a,b)=>a+b,0) || 1;
     let start = -Math.PI/2;
     values.forEach((v,i)=>{
@@ -139,9 +139,9 @@
     ctx.beginPath(); ctx.arc(cx,cy, r*0.6, 0, Math.PI*2); ctx.fill();
     ctx.globalCompositeOperation = 'source-over';
     // legend
-    ctx.fillStyle = '#292524'; ctx.font = '12px -apple-system, sans-serif';
-    let lx = 10, ly = 18;
-    labels.forEach((lab,i)=>{ ctx.fillStyle = colors[i]; ctx.fillRect(lx, ly-10, 10, 10); ctx.fillStyle = '#57534e'; ctx.fillText(`${lab}: ${values[i]}`, lx+16, ly); ly += 16; });
+    ctx.fillStyle = '#292524'; ctx.font = 'bold 14px -apple-system, sans-serif';
+    let lx = 15, ly = 25;
+    labels.forEach((lab,i)=>{ ctx.fillStyle = colors[i]; ctx.fillRect(lx, ly-12, 12, 12); ctx.fillStyle = '#57534e'; ctx.font = '14px -apple-system, sans-serif'; ctx.fillText(`${lab}: ${values[i]}`, lx+20, ly); ly += 20; });
   }
 
   loadSummaries();
