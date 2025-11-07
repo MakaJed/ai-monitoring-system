@@ -664,6 +664,7 @@ def initialize_thermal_if_available() -> None:
                     
                     sensor_initialized = False
                     final_rate = 4.0  # Default fallback
+                    global thermal_refresh_rate_hz
                     for rate_enum, rate_val, rate_name in rates_to_try:
                         try:
                             sensor.refresh_rate = rate_enum
