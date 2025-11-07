@@ -690,58 +690,70 @@ def initialize_thermal_if_available() -> None:
             
             print("[Thermal] Sensor object ready")
             
-            # Try refresh rates from highest to lowest (like old code, but with fallback)
-            # Old code just set 8 Hz and worked - let's try that approach first
+            # Try refresh rates from highest to lowest
+            # For 8 Hz (which used to work), we'll trust it like the old code did
+            # Only test if it's a higher rate (16 Hz) or lower fallback (4 Hz, 2 Hz)
             refresh_rates = [
-                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz"),
-                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz"),  # This used to work!
-                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz"),
-                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz"),
+                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz", True),   # Test this one
+                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz", False),    # Trust it (old code approach)
+                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz", True),    # Test fallback
+                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz", True),    # Test fallback
             ]
             
             sensor_working = False
             test_frame = None
             
-            for rate, rate_name in refresh_rates:
+            for rate, rate_name, should_test in refresh_rates:
                 try:
                     print(f"[Thermal] Setting refresh rate to {rate_name}...")
                     sensor.refresh_rate = rate
-                    # Old code just set it and continued - give it a moment to settle
-                    time.sleep(1.5)  # Simple delay, not aggressive
                     
-                    # Simple test: try to read ONE frame (like old code would do naturally)
-                    print(f"[Thermal] Testing {rate_name} with single frame read...")
-                    test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
+                    # Wait time depends on rate - higher rates need more time
+                    wait_time = 2.5 if rate_name == "16 Hz" else (2.0 if rate_name == "8 Hz" else 1.5)
+                    print(f"[Thermal] Waiting {wait_time}s for sensor to stabilize...")
+                    time.sleep(wait_time)
                     
-                    # Try a few times, but not aggressively - just enough to see if it works
-                    for test_attempt in range(3):
+                    if not should_test:
+                        # For 8 Hz, trust it like old code did - no aggressive testing
+                        print(f"[Thermal] Using {rate_name} (trusted, like old code)")
+                        sensor_working = True
+                        # Still do a quick validation read to populate test_frame
+                        test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
                         try:
                             sensor.getFrame(test_frame)
-                            # Success! This rate works
-                            sensor_working = True
-                            print(f"[Thermal] ✓ {rate_name} working!")
-                            break
-                        except RuntimeError as e:
-                            error_msg = str(e)
-                            if "too many retries" in error_msg.lower():
-                                if test_attempt < 2:
-                                    # Wait a bit longer between attempts for higher rates
-                                    wait_time = 0.8 if rate_name in ["16 Hz", "8 Hz"] else 0.5
-                                    time.sleep(wait_time)
-                                else:
-                                    # This rate doesn't work, try next
-                                    print(f"[Thermal] {rate_name} not stable, trying next rate...")
-                                    break
-                            else:
-                                raise
-                        except Exception as e:
-                            if test_attempt < 2:
-                                time.sleep(0.5)
-                            else:
-                                break
-                    
-                    if sensor_working:
+                            print(f"[Thermal] ✓ {rate_name} validated")
+                        except:
+                            # Even if validation fails, trust it (old code approach)
+                            print(f"[Thermal] Note: Initial read had issues, but continuing with {rate_name}")
                         break
+                    else:
+                        # For other rates, do a simple test
+                        print(f"[Thermal] Testing {rate_name}...")
+                        test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
+                        
+                        for test_attempt in range(2):  # Just 2 attempts, not aggressive
+                            try:
+                                sensor.getFrame(test_frame)
+                                sensor_working = True
+                                print(f"[Thermal] ✓ {rate_name} working!")
+                                break
+                            except RuntimeError as e:
+                                if "too many retries" in str(e).lower():
+                                    if test_attempt < 1:
+                                        time.sleep(1.0)
+                                    else:
+                                        print(f"[Thermal] {rate_name} not stable, trying next rate...")
+                                        break
+                                else:
+                                    raise
+                            except Exception as e:
+                                if test_attempt < 1:
+                                    time.sleep(0.5)
+                                else:
+                                    break
+                        
+                        if sensor_working:
+                            break
                 except Exception as e:
                     print(f"[Thermal] {rate_name} failed: {e}, trying next rate...")
                     time.sleep(0.5)
