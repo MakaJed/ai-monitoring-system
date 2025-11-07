@@ -3,25 +3,25 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Settings</title>
+  <title>Settings - Hensight</title>
   <link rel="icon" type="image/png" href="/static/images/logo.png" />
   <link rel="stylesheet" href="/static/css/style.css?v={{ cache_bust }}" />
   <style>
-    body { background:#f7faf7; color:#1f2937; }
+    body { background:var(--bg); color:var(--text); }
     .panel { background:#ffffff; box-shadow:0 6px 20px rgba(0,0,0,0.06); border-radius:12px; padding:16px; max-width:820px; margin:20px auto; }
     .row { display:flex; gap:12px; align-items:center; margin:8px 0; }
     .row label { width:280px; font-weight:600; }
-    .row input { flex:1; padding:8px; border:1px solid #cbd5e1; border-radius:8px; }
-    .btn-primary { background:#16a34a; color:white; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; }
-    .btn-primary:hover { background:#15803d; }
+    .row input { flex:1; padding:8px; border:1px solid var(--border); border-radius:8px; }
+    .btn-primary { background:var(--accent); color:white; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; font-weight:500; }
+    .btn-primary:hover { background:var(--accent-dark); }
   </style>
 </head>
 <body>
   <nav class="topbar">
     <div class="brand">
-      <img src="/static/images/logo.png" alt="NDV Poultry Monitor Logo" class="brand-logo" />
+      <img src="/static/images/logo.png" alt="Hensight Logo" class="brand-logo" />
       <div class="brand-text">
-        <div class="title">NDV Poultry Monitor</div>
+        <div class="title">Hensight</div>
         <div class="subtitle">Settings</div>
       </div>
     </div>
