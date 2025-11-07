@@ -117,6 +117,7 @@ thermal_lock = threading.Lock()
 thermal_sensor = None  # type: ignore
 thermal_shape = (24, 32)  # MLX90640 default
 thermal_refresh_rate_hz = 4.0  # Default, will be updated during init
+last_valid_thermal_frame = None  # Buffer to prevent black screens
 
 bme680_lock = threading.Lock()
 bme680_sensor = None  # type: ignore
@@ -157,7 +158,7 @@ latest_detections = []  # list of dicts: {x1,y1,x2,y2,score,class}
 latest_detections_ts = 0.0
 
 # Symptoms model globals
-SYMPTOMS_MODEL_FILE = os.getenv("SYMPTOMS_MODEL_FILE", "ndvsymptoms.tflite")
+SYMPTOMS_MODEL_FILE = os.getenv("SYMPTOMS_MODEL_FILE", "symptomsv3.tflite")
 SYMPTOMS_LABELS_FILE = os.getenv("SYMPTOMS_LABELS_FILE", "symptoms.labels.txt")
 SYMPTOMS_MODEL_PATH = os.path.join(MODELS_DIR, SYMPTOMS_MODEL_FILE)
 SYMPTOMS_LABELS_PATH = os.path.join(MODELS_DIR, SYMPTOMS_LABELS_FILE)
@@ -636,8 +637,8 @@ def initialize_thermal_if_available() -> None:
     for attempt in range(3):
         try:
             print(f"[Thermal] Attempt {attempt + 1}/3...")
-            # Create I2C bus with longer stabilization
-            i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+            # Create I2C bus - use 300kHz for better stability at higher refresh rates
+            i2c = busio.I2C(board.SCL, board.SDA, frequency=300000)
             time.sleep(1.0)  # Give I2C bus more time to stabilize
             
             print("[Thermal] Creating MLX90640 sensor instance...")
@@ -660,7 +661,7 @@ def initialize_thermal_if_available() -> None:
                             try:
                                 i2c.deinit()
                                 time.sleep(1.0)
-                                i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+                                i2c = busio.I2C(board.SCL, board.SDA, frequency=300000)
                                 time.sleep(1.0)
                             except:
                                 pass
@@ -692,70 +693,63 @@ def initialize_thermal_if_available() -> None:
             print("[Thermal] Sensor object ready")
             
             # Try refresh rates from highest to lowest (want fastest that works)
-            # MLX90640 supports: 0.5, 1, 2, 4, 8, 16 Hz (32/64 Hz often unstable)
+            # MLX90640 supports: 0.5, 1, 2, 4, 8, 16, 32, 64 Hz
+            # Higher = faster updates, but some sensors can't handle 16Hz+
+            # Prioritize 8 Hz for smooth operation
             refresh_rates = [
-                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz", 5.0, 25),  # Needs longest stabilization
-                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz", 4.0, 20),
-                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz", 3.0, 15),
-                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz", 2.0, 10),
+                (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz"),  # Target: smooth 8 Hz
+                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz"),  # Try 16 Hz if 8 works
+                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz"),  # Fallback
+                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz"),  # Last resort
             ]
             
             sensor_working = False
-            for rate, rate_name, settle_time, max_retries in refresh_rates:
+            for rate, rate_name in refresh_rates:
                 try:
                     print(f"[Thermal] Trying {rate_name} refresh rate...")
                     sensor.refresh_rate = rate
-                    print(f"[Thermal] Stabilizing sensor for {settle_time}s at {rate_name}...")
-                    time.sleep(settle_time)  # Critical: longer delays for higher refresh rates
+                    # Longer stabilization for higher refresh rates
+                    stabilization_time = 2.5 if "8" in rate_name or "16" in rate_name else 2.0
+                    time.sleep(stabilization_time)
                     
-                    # Calculate minimum time between frames for this refresh rate
-                    # At 8 Hz, frames come every 125ms; at 16 Hz, every 62.5ms
-                    # We need to wait at least this long between reads
-                    frame_interval = 1.0 / float(rate_name.split()[0])  # e.g., "8 Hz" -> 0.125s
-                    min_wait = max(frame_interval * 1.5, 0.2)  # At least 1.5x frame interval, minimum 200ms
-                    
-                    # Now test with proper timing
-                    print(f"[Thermal] Testing {rate_name} (waiting {min_wait*1000:.0f}ms between reads)...")
+                    # Test read with multiple retries (MLX90640 often needs this)
+                    print("[Thermal] Testing frame read with retries...")
                     test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
                     
-                    for frame_retry in range(max_retries):
+                    # For 8 Hz and above, need more careful timing
+                    frame_retry_count = 8 if "8" in rate_name or "16" in rate_name else 5
+                    retry_delay = 0.15 if "8" in rate_name or "16" in rate_name else 0.5
+                    
+                    for frame_retry in range(frame_retry_count):
                         try:
                             sensor.getFrame(test_frame)
-                            # Success
-                            sensor_working = True
-                            print(f"[Thermal] ✓ Frame read successful with {rate_name} (attempt {frame_retry + 1}/{max_retries})")
-                            break
-                        except RuntimeError as e:
-                            error_msg = str(e)
-                            if "too many retries" in error_msg.lower():
-                                if frame_retry < max_retries - 1:
-                                    # Wait longer - at least the frame interval plus some buffer
-                                    delay = min_wait * (1.5 + frame_retry * 0.3)  # Progressive delay
-                                    if frame_retry % 3 == 0:  # Log every 3rd attempt
-                                        print(f"[Thermal] Retry {frame_retry + 1}/{max_retries} (waiting {delay*1000:.0f}ms)...")
-                                    time.sleep(delay)
-                                else:
-                                    raise
+                            # Filter outlier pixels on test frame
+                            test_frame = filter_outlier_pixels(test_frame, thermal_shape)
+                            # Validate test frame
+                            if max(test_frame) > 0.0 and min(test_frame) >= -40.0:
+                                sensor_working = True
+                                print(f"[Thermal] Frame read successful with {rate_name}")
+                                break
                             else:
-                                raise
-                        except Exception as e:
-                            if frame_retry < max_retries - 1:
-                                time.sleep(min_wait)
+                                raise RuntimeError("Invalid temperature values in test frame")
+                        except RuntimeError as e:
+                            if frame_retry < frame_retry_count - 1:
+                                error_msg = str(e)
+                                if "too many retries" not in error_msg.lower():
+                                    print(f"[Thermal] Frame read retry {frame_retry + 1}/{frame_retry_count}: {e}")
+                                time.sleep(retry_delay)
                             else:
                                 raise
                     
                     if sensor_working:
-                        print(f"[Thermal] ✓✓ {rate_name} confirmed working!")
-                        # Store the refresh rate for use in stream generator
+                        # Update global refresh rate
                         global thermal_refresh_rate_hz
                         thermal_refresh_rate_hz = float(rate_name.split()[0])
                         break
                 except Exception as e:
-                    print(f"[Thermal] ✗ {rate_name} failed after all retries: {e}")
+                    print(f"[Thermal] {rate_name} failed: {e}")
                     if rate == refresh_rates[-1][0]:
                         raise
-                    # Reset sensor state before trying next rate
-                    time.sleep(1.0)
                     continue
             
             if not sensor_working:
@@ -773,8 +767,12 @@ def initialize_thermal_if_available() -> None:
                 if max_temp > 10.0 and min_temp >= -40.0:  # Reasonable temperature check
                     with thermal_lock:
                         thermal_sensor = sensor
+                    # Initialize last valid frame buffer
+                    global last_valid_thermal_frame
+                    last_valid_thermal_frame = test_frame.copy()
                     print(f"[Thermal] OK MLX90640 initialized successfully!")
                     print(f"[Thermal] Test frame: min={min_temp:.1f}°C, max={max_temp:.1f}°C, avg={avg_temp:.1f}°C")
+                    print(f"[Thermal] Outlier pixel filtering enabled")
                     return
                 else:
                     print(f"[Thermal] Warning: Test frame has invalid values (min: {min_temp:.1f}°C, max: {max_temp:.1f}°C)")
@@ -818,9 +816,57 @@ def initialize_thermal_if_available() -> None:
                     thermal_sensor = None
 
 
+def filter_outlier_pixels(frame: list[float], shape: tuple[int, int]) -> list[float]:
+    """
+    Filter outlier pixels in MLX90640 thermal frame using median filtering.
+    Outlier pixels are typically very hot or very cold compared to neighbors.
+    """
+    if np is None or len(frame) != shape[0] * shape[1]:
+        return frame
+    
+    try:
+        # Reshape to 2D array
+        arr = np.array(frame, dtype=np.float32).reshape(shape)
+        filtered = arr.copy()
+        
+        # Threshold for outlier detection: pixels that differ by more than 10°C from median of neighbors
+        outlier_threshold = 10.0
+        
+        rows, cols = shape
+        for r in range(rows):
+            for c in range(cols):
+                val = arr[r, c]
+                # Get neighbors (excluding current pixel)
+                neighbors = []
+                for dr in [-1, 0, 1]:
+                    for dc in [-1, 0, 1]:
+                        if dr == 0 and dc == 0:
+                            continue
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < rows and 0 <= nc < cols:
+                            neighbors.append(arr[nr, nc])
+                
+                if len(neighbors) > 0:
+                    # Calculate median of neighbors
+                    neighbor_median = np.median(neighbors)
+                    # If pixel differs significantly from neighbors, replace with median
+                    if abs(val - neighbor_median) > outlier_threshold:
+                        filtered[r, c] = neighbor_median
+        
+        return filtered.flatten().tolist()
+    except Exception:
+        # If filtering fails, return original frame
+        return frame
+
+
 def read_thermal_frame() -> tuple[bool, list[float] | None]:
+    global last_valid_thermal_frame
+    
     with thermal_lock:
         if thermal_sensor is None:
+            # Return last valid frame if available to prevent black screen
+            if last_valid_thermal_frame is not None:
+                return True, last_valid_thermal_frame.copy()
             return False, None
     
     # Retry up to 10 times if read fails (MLX90640 often needs multiple attempts)
@@ -829,39 +875,56 @@ def read_thermal_frame() -> tuple[bool, list[float] | None]:
             frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
             with thermal_lock:
                 if thermal_sensor is None:
+                    if last_valid_thermal_frame is not None:
+                        return True, last_valid_thermal_frame.copy()
                     return False, None
                 thermal_sensor.getFrame(frame)
+            
+            # Filter outlier pixels
+            frame = filter_outlier_pixels(frame, thermal_shape)
             
             # Validate frame data
             if frame and len(frame) == thermal_shape[0] * thermal_shape[1]:
                 # Check for reasonable temperature values
                 if max(frame) > 0.0 and min(frame) >= -40.0:  # MLX90640 range is roughly -40 to 125°C
+                    # Update last valid frame buffer
+                    last_valid_thermal_frame = frame.copy()
                     return True, frame
             
             # If validation failed, retry with longer delay
             if retry < 9:
-                time.sleep(0.2 if retry < 3 else 0.5)  # Longer delays after first few attempts
+                time.sleep(0.15 if retry < 3 else 0.4)  # Shorter delays for faster refresh rates
         except RuntimeError as e:
             # "Too many retries" from MLX90640 - wait longer before retry
             if "too many retries" in str(e).lower() or "retry" in str(e).lower():
                 if retry < 9:
-                    time.sleep(0.3 + (retry * 0.1))  # Progressive delay
+                    # Progressive delay, but shorter for 8 Hz support
+                    time.sleep(0.2 + (retry * 0.05))
                 else:
                     # Log error occasionally to avoid spam
                     if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
                         print(f"[Thermal] Persistent read error after 10 retries: {e}")
                         read_thermal_frame._last_error_log = time.time()
+                    # Return last valid frame if available
+                    if last_valid_thermal_frame is not None:
+                        return True, last_valid_thermal_frame.copy()
             else:
                 raise
         except Exception as e:
             if retry < 9:
-                time.sleep(0.2)
+                time.sleep(0.15)
             else:
                 # Log error occasionally to avoid spam
                 if not hasattr(read_thermal_frame, '_last_error_log') or time.time() - read_thermal_frame._last_error_log > 30:
                     print(f"[Thermal] read_thermal_frame error: {e}")
                     read_thermal_frame._last_error_log = time.time()
+                # Return last valid frame if available
+                if last_valid_thermal_frame is not None:
+                    return True, last_valid_thermal_frame.copy()
     
+    # If all retries failed, return last valid frame if available
+    if last_valid_thermal_frame is not None:
+        return True, last_valid_thermal_frame.copy()
     return False, None
 
 
@@ -1318,7 +1381,9 @@ def generate_thermal_stream():
     # At 8 Hz, frames come every 125ms; at 16 Hz, every 62.5ms
     # We need to wait at least this long between reads
     frame_interval = 1.0 / thermal_refresh_rate_hz
-    min_wait = max(frame_interval * 1.2, 0.15)  # At least 1.2x frame interval, minimum 150ms
+    # For 8 Hz, use 1.15x interval for smoother operation; for others use 1.2x
+    multiplier = 1.15 if thermal_refresh_rate_hz >= 8.0 else 1.2
+    min_wait = max(frame_interval * multiplier, 0.12)  # At least frame interval * multiplier, minimum 120ms
     
     while True:
         ok, frame_vals = read_thermal_frame()
@@ -1331,7 +1396,8 @@ def generate_thermal_stream():
                     time.sleep(1.0)
                     # Recalculate frame interval in case refresh rate changed
                     frame_interval = 1.0 / thermal_refresh_rate_hz
-                    min_wait = max(frame_interval * 1.2, 0.15)
+                    multiplier = 1.15 if thermal_refresh_rate_hz >= 8.0 else 1.2
+                    min_wait = max(frame_interval * multiplier, 0.12)
                     consecutive_failures = 0
                 except Exception:
                     pass
