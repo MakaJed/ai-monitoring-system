@@ -1264,17 +1264,20 @@ def generate_camera_stream():
                     2,
                     cv2.LINE_AA,
                 )
-            # Draw latest detections if recent
+            # Draw latest detections if recent - only show chicken detections
+            # This ensures visible and thermal feeds show boxes at the same time for the same chickens
             with latest_detections_lock:
                 if now_ts - latest_detections_ts <= DETECTION_OVERLAY_SECONDS and latest_detections:
+                    # Filter to only show chicken detections (matches thermal feed logic)
                     for d in latest_detections:
-                        x1, y1, x2, y2 = d["x1"], d["y1"], d["x2"], d["y2"]
-                        cls_idx = d["class"]
+                        cls_idx = d.get("class", -1)
                         label = labels[cls_idx] if 0 <= cls_idx < len(labels) else str(cls_idx)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        # Remove confidence from visible overlay per request
-                        cv2.putText(frame, f"{label}", (x1, max(12, y1 - 6)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+                        # Only draw boxes for chickens (same filter as thermal feed)
+                        if label.lower() == "chicken":
+                            x1, y1, x2, y2 = d["x1"], d["y1"], d["x2"], d["y2"]
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            cv2.putText(frame, f"{label}", (x1, max(12, y1 - 6)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
         except Exception:
             pass
         jpeg = format_mjpeg(frame)
