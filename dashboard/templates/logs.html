@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>Logs & Analytics - NDV Monitor</title>
   <link rel="stylesheet" href="/static/css/style.css?v={{ cache_bust }}" />
   <style>
@@ -201,6 +203,72 @@
       width: 32px;
       text-align: center;
     }
+    
+    /* Mobile responsive for logs table */
+    @media (max-width: 768px) {
+      .log-table {
+        font-size: 12px;
+      }
+      
+      .log-table th,
+      .log-table td {
+        padding: 6px 4px;
+      }
+      
+      .logs-header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      
+      .logs-header h2 {
+        font-size: 16px;
+      }
+    }
+    
+    @media (max-width: 480px) {
+      .log-table {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      
+      .log-table thead,
+      .log-table tbody,
+      .log-table tr,
+      .log-table th,
+      .log-table td {
+        display: block;
+      }
+      
+      .log-table thead {
+        display: none;
+      }
+      
+      .log-table tr {
+        margin-bottom: 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px;
+        background: var(--panel);
+      }
+      
+      .log-table td {
+        border: none;
+        padding: 4px 0;
+        text-align: left !important;
+      }
+      
+      .log-table td:before {
+        content: attr(data-label) ": ";
+        font-weight: 600;
+        display: inline-block;
+        min-width: 100px;
+      }
+      
+      .checkbox-cell {
+        display: none;
+      }
+    }
   </style>
 </head>
 <body>
@@ -364,14 +432,14 @@
                 
                 return `<tr>
                   <td class="checkbox-cell"><input type="checkbox" class="sel" data-id="${item.id}" /></td>
-                  <td><div class="log-timestamp">${item.timestamp || 'Unknown'}</div></td>
-                  <td><span class="status-badge ${cls}">${status.charAt(0).toUpperCase()+status.slice(1)}</span></td>
-                  <td class="log-metric">${item.bme_temp ?? '-'}</td>
-                  <td class="log-metric">${item.bme_humidity ?? '-'}</td>
-                  <td class="log-metric">${item.bme_gas ? (item.bme_gas / 1000).toFixed(1) : '-'}</td>
-                  <td class="log-metric">${item.bme_pressure ?? '-'}</td>
-                  <td>${symptomsHtml}</td>
-                  <td>${viewBtn}</td>
+                  <td data-label="Timestamp"><div class="log-timestamp">${item.timestamp || 'Unknown'}</div></td>
+                  <td data-label="Status"><span class="status-badge ${cls}">${status.charAt(0).toUpperCase()+status.slice(1)}</span></td>
+                  <td class="log-metric" data-label="Temp (°C)">${item.bme_temp ?? '-'}</td>
+                  <td class="log-metric" data-label="Humidity (%)">${item.bme_humidity ?? '-'}</td>
+                  <td class="log-metric" data-label="Gas (kΩ)">${item.bme_gas ? (item.bme_gas / 1000).toFixed(1) : '-'}</td>
+                  <td class="log-metric" data-label="Pressure (hPa)">${item.bme_pressure ?? '-'}</td>
+                  <td data-label="Symptoms">${symptomsHtml}</td>
+                  <td data-label="Actions">${viewBtn}</td>
                 </tr>`;
               }).join('')}
             </tbody>

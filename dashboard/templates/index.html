@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <title>NDV Poultry Monitor</title>
   <link rel="stylesheet" href="/static/css/style.css?v={{ cache_bust }}" />
   <style>
@@ -25,9 +28,9 @@
     </div>
     <div class="top-actions">
       <button id="btn-dashboard" class="btn">Dashboard</button>
-      <a class="btn btn-outline" href="/logs">Logs &amp; Analytics</a>
+      <a class="btn btn-outline" href="/logs">Logs</a>
       <div class="notifications notif-wrap">
-        <button id="notif-toggle" class="btn btn-outline">🔔</button>
+        <button id="notif-toggle" class="btn btn-outline" aria-label="Notifications">🔔</button>
         <span id="notif-badge" class="badge">0</span>
         <div id="notif-menu" class="notif-menu">
           <div class="notif-header">Notifications <span id="notif-count"></span></div>

@@ -48,6 +48,7 @@
   async function pollStatus() {
     try {
       const res = await fetch('/status');
+      if (!res.ok) throw new Error('Status not OK');
       const data = await res.json();
       cpuPercent.textContent = data.cpu_percent ?? '-';
       cpuTemp.textContent = data.cpu_temp_c ?? '-';
@@ -63,9 +64,11 @@
         onlineIndicator.textContent = 'Offline';
       }
     } catch (e) {
+      // Offline or error - show offline state but don't break
       onlineIndicator.classList.remove('online');
       onlineIndicator.classList.add('offline');
       onlineIndicator.textContent = 'Offline';
+      // Keep last known values, don't clear them
     }
   }
 
@@ -91,6 +94,7 @@
   async function pollSensors() {
     try {
       const res = await fetch('/sensor_data');
+      if (!res.ok) throw new Error('Sensor data not OK');
       const data = await res.json();
       if (data.status === 'offline') {
         tempEl.textContent = '-';
@@ -103,16 +107,17 @@
         setBadge(badgePres, null);
         return;
       }
-      tempEl.textContent = data.temperature_c;
-      humEl.textContent = data.humidity_pct;
-      gasEl.textContent = data.gas_ohms;
-      presEl.textContent = data.pressure_hpa;
+      tempEl.textContent = data.temperature_c ?? '-';
+      humEl.textContent = data.humidity_pct ?? '-';
+      gasEl.textContent = data.gas_ohms ?? '-';
+      presEl.textContent = data.pressure_hpa ?? '-';
 
       setBadge(badgeTemp, data.temperature_c, 30, 38);
       setBadge(badgeHum, data.humidity_pct, 70, 85);
       setBadge(badgeGas, data.gas_ohms, null, null);
       setBadge(badgePres, data.pressure_hpa, null, null);
     } catch (e) {
+      // Offline or error - show offline badges but keep UI functional
       setBadge(badgeTemp, null);
       setBadge(badgeHum, null);
       setBadge(badgeGas, null);
@@ -134,6 +139,7 @@
   async function pollNotifications() {
     try {
       const res = await fetch('/notifications');
+      if (!res.ok) throw new Error('Notifications not OK');
       const data = await res.json();
       const alerts = data.alerts || [];
       renderNotifications(alerts);
@@ -146,7 +152,7 @@
         }
       }
     } catch (e) {
-      // ignore
+      // Offline or error - silently fail, keep last state
     }
   }
 
@@ -171,6 +177,7 @@
   async function pollModelStatus() {
     try {
       const res = await fetch('/model_status');
+      if (!res.ok) throw new Error('Model status not OK');
       const data = await res.json();
       modelBadge.classList.remove('badge-ok', 'badge-warn', 'badge-alert');
       if (data.available) {
@@ -182,24 +189,31 @@
         modelBadge.classList.add('badge-alert');
       }
     } catch (e) {
+      // Offline or error - show error state
       modelBadge.classList.remove('badge-ok');
       modelBadge.classList.add('badge-alert');
-      modelBadge.textContent = 'Model: error';
+      modelBadge.textContent = 'Model: offline';
     }
   }
 
   async function loadAnalytics() {
     try {
       const res = await fetch('/api/summaries');
+      if (!res.ok) throw new Error('Analytics not OK');
       const data = await res.json();
       const daily = data.daily || [];
       const today = daily[0] || {};
       const avgT = today.avg_temp ?? '-';
       const avgH = today.avg_humidity ?? '-';
       const abn  = today.abnormal ?? 0;
-      chartArea.textContent = `Today — Avg Temp: ${avgT} °C | Avg Hum: ${avgH} % | Abnormal: ${abn}`;
+      if (chartArea) {
+        chartArea.textContent = `Today — Avg Temp: ${avgT} °C | Avg Hum: ${avgH} % | Abnormal: ${abn}`;
+      }
     } catch (e) {
-      chartArea.textContent = 'Analytics unavailable';
+      // Offline or error - show unavailable but don't break
+      if (chartArea) {
+        chartArea.textContent = 'Analytics unavailable';
+      }
     }
   }
 
