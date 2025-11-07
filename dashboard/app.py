@@ -133,6 +133,9 @@ alerts_queue = deque(maxlen=200)  # recent alerts kept in memory
 # Unified stream sizing
 STREAM_WIDTH = 640
 STREAM_HEIGHT = 480
+# Thermal display size (reduced for 8 Hz stability - less upscaling overhead)
+THERMAL_DISPLAY_WIDTH = 480  # Reduced from 640 for faster processing
+THERMAL_DISPLAY_HEIGHT = 360  # Reduced from 480 for faster processing
 
 # Detection and alert configuration
 HOTSPOT_DELTA_C = 3.0  # hotspot threshold above ambient average
@@ -818,8 +821,9 @@ def initialize_thermal_if_available() -> None:
 
 def filter_outlier_pixels(frame: list[float], shape: tuple[int, int]) -> list[float]:
     """
-    Filter outlier pixels in MLX90640 thermal frame using median filtering.
+    Filter outlier pixels in MLX90640 thermal frame using fast median filtering.
     Outlier pixels are typically very hot or very cold compared to neighbors.
+    Optimized for speed to support 8 Hz refresh rate.
     """
     if np is None or len(frame) != shape[0] * shape[1]:
         return frame
@@ -827,29 +831,28 @@ def filter_outlier_pixels(frame: list[float], shape: tuple[int, int]) -> list[fl
     try:
         # Reshape to 2D array
         arr = np.array(frame, dtype=np.float32).reshape(shape)
-        filtered = arr.copy()
         
-        # Threshold for outlier detection: pixels that differ by more than 10°C from median of neighbors
-        outlier_threshold = 10.0
-        
-        rows, cols = shape
-        for r in range(rows):
-            for c in range(cols):
-                val = arr[r, c]
-                # Get neighbors (excluding current pixel)
-                neighbors = []
-                for dr in [-1, 0, 1]:
-                    for dc in [-1, 0, 1]:
-                        if dr == 0 and dc == 0:
-                            continue
-                        nr, nc = r + dr, c + dc
-                        if 0 <= nr < rows and 0 <= nc < cols:
-                            neighbors.append(arr[nr, nc])
-                
-                if len(neighbors) > 0:
-                    # Calculate median of neighbors
+        # Use scipy median filter if available (much faster), otherwise use simple approach
+        try:
+            from scipy import ndimage
+            # Use 3x3 median filter (faster than manual neighbor checking)
+            filtered = ndimage.median_filter(arr, size=3)
+        except ImportError:
+            # Fallback: vectorized approach using numpy (faster than loops)
+            filtered = arr.copy()
+            outlier_threshold = 10.0
+            
+            # Pad array for easier neighbor access
+            padded = np.pad(arr, 1, mode='edge')
+            rows, cols = shape
+            
+            for r in range(rows):
+                for c in range(cols):
+                    # Get 3x3 neighborhood (excluding center)
+                    neighborhood = padded[r:r+3, c:c+3].flatten()
+                    neighbors = np.concatenate([neighborhood[:4], neighborhood[5:]])  # Exclude center
                     neighbor_median = np.median(neighbors)
-                    # If pixel differs significantly from neighbors, replace with median
+                    val = arr[r, c]
                     if abs(val - neighbor_median) > outlier_threshold:
                         filtered[r, c] = neighbor_median
         
@@ -1346,7 +1349,64 @@ def generate_camera_stream():
                b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n")
 
 
+def create_custom_thermal_colormap() -> "np.ndarray | None":
+    """
+    Create custom colormap: blue-green (cool) → orange-red (hot)
+    Returns a 256x1 BGR lookup table for cv2.LUT
+    """
+    if np is None:
+        return None
+    try:
+        lut = np.zeros((256, 1, 3), dtype=np.uint8)
+        for i in range(256):
+            # Normalize to 0-1
+            t = i / 255.0
+            # Blue-green (cool) for low values (0-0.4)
+            if t < 0.4:
+                # Blue to cyan to green
+                phase = t / 0.4
+                if phase < 0.5:
+                    # Blue to cyan
+                    r = int(0)
+                    g = int(phase * 2 * 255)
+                    b = int(255)
+                else:
+                    # Cyan to green
+                    r = int(0)
+                    g = int(255)
+                    b = int((1.0 - (phase - 0.5) * 2) * 255)
+            # Yellow-orange-red (hot) for high values (0.4-1.0)
+            else:
+                # Green to yellow to orange to red
+                phase = (t - 0.4) / 0.6
+                if phase < 0.33:
+                    # Green to yellow
+                    r = int(phase * 3 * 255)
+                    g = int(255)
+                    b = int(0)
+                elif phase < 0.66:
+                    # Yellow to orange
+                    sub_phase = (phase - 0.33) / 0.33
+                    r = int(255)
+                    g = int(255 - sub_phase * 128)
+                    b = int(0)
+                else:
+                    # Orange to red
+                    sub_phase = (phase - 0.66) / 0.34
+                    r = int(255)
+                    g = int(127 - sub_phase * 127)
+                    b = int(0)
+            lut[i, 0] = [b, g, r]  # BGR format for OpenCV
+        return lut
+    except Exception:
+        return None
+
+
+# Cache the custom colormap
+_custom_colormap_lut = None
+
 def colormap_thermal(values: list[float]) -> "np.ndarray | None":
+    global _custom_colormap_lut
     if np is None or cv2 is None:
         return None
     try:
@@ -1356,7 +1416,15 @@ def colormap_thermal(values: list[float]) -> "np.ndarray | None":
         if max_v - min_v < 1e-6:
             max_v = min_v + 1e-6
         norm = ((arr - min_v) / (max_v - min_v) * 255.0).astype(np.uint8)
-        colored = cv2.applyColorMap(norm, cv2.COLORMAP_INFERNO)
+        
+        # Use custom colormap: blue-green (cool) → orange-red (hot)
+        if _custom_colormap_lut is None:
+            _custom_colormap_lut = create_custom_thermal_colormap()
+        if _custom_colormap_lut is not None:
+            colored = cv2.LUT(cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR), _custom_colormap_lut)
+        else:
+            # Fallback to JET if custom colormap creation fails
+            colored = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
         return colored
     except Exception:
         return None
@@ -1434,10 +1502,10 @@ def generate_thermal_stream():
             colored = cv2.flip(colored, 1)
         except Exception:
             pass
-        # Ensure consistent sizing
+        # Resize to thermal display size (smaller = faster processing for 8 Hz)
         try:
-            if colored.shape[1] != STREAM_WIDTH or colored.shape[0] != STREAM_HEIGHT:
-                colored = cv2.resize(colored, (STREAM_WIDTH, STREAM_HEIGHT))
+            if colored.shape[1] != THERMAL_DISPLAY_WIDTH or colored.shape[0] != THERMAL_DISPLAY_HEIGHT:
+                colored = cv2.resize(colored, (THERMAL_DISPLAY_WIDTH, THERMAL_DISPLAY_HEIGHT), interpolation=cv2.INTER_LINEAR)
         except Exception:
             pass
 
@@ -1449,11 +1517,11 @@ def generate_thermal_stream():
                 arr = np.array(frame_values_list, dtype=np.float32).reshape(thermal_shape)
                 # Flip horizontally to match the flipped displayed image
                 arr = arr[:, ::-1]
-                # Map pixels to thermal grid indices
-                col1 = max(0, min(thermal_shape[1]-1, int(x1p / max(1, STREAM_WIDTH) * thermal_shape[1])))
-                col2 = max(0, min(thermal_shape[1]-1, int(x2p / max(1, STREAM_WIDTH) * thermal_shape[1])))
-                row1 = max(0, min(thermal_shape[0]-1, int(y1p / max(1, STREAM_HEIGHT) * thermal_shape[0])))
-                row2 = max(0, min(thermal_shape[0]-1, int(y2p / max(1, STREAM_HEIGHT) * thermal_shape[0])))
+                # Map pixels to thermal grid indices (use thermal display size, not stream size)
+                col1 = max(0, min(thermal_shape[1]-1, int(x1p / max(1, THERMAL_DISPLAY_WIDTH) * thermal_shape[1])))
+                col2 = max(0, min(thermal_shape[1]-1, int(x2p / max(1, THERMAL_DISPLAY_WIDTH) * thermal_shape[1])))
+                row1 = max(0, min(thermal_shape[0]-1, int(y1p / max(1, THERMAL_DISPLAY_HEIGHT) * thermal_shape[0])))
+                row2 = max(0, min(thermal_shape[0]-1, int(y2p / max(1, THERMAL_DISPLAY_HEIGHT) * thermal_shape[0])))
                 c1, c2 = sorted((col1, col2))
                 r1, r2 = sorted((row1, row2))
                 if r2 < r1 or c2 < c1:
@@ -1476,13 +1544,16 @@ def generate_thermal_stream():
                         vy1 = d["y1"] + CALIBRATION_OFFSET_Y
                         vx2 = d["x2"] + CALIBRATION_OFFSET_X
                         vy2 = d["y2"] + CALIBRATION_OFFSET_Y
-                        # Mirror horizontally for flipped thermal
-                        tx1 = STREAM_WIDTH - 1 - vx2
-                        tx2 = STREAM_WIDTH - 1 - vx1
-                        x1 = max(0, min(STREAM_WIDTH - 1, tx1))
-                        y1 = max(0, min(STREAM_HEIGHT - 1, vy1))
-                        x2 = max(0, min(STREAM_WIDTH - 1, tx2))
-                        y2 = max(0, min(STREAM_HEIGHT - 1, vy2))
+                        # Mirror horizontally for flipped thermal and scale to thermal display size
+                        # Scale from visible camera size to thermal display size
+                        scale_x = THERMAL_DISPLAY_WIDTH / STREAM_WIDTH
+                        scale_y = THERMAL_DISPLAY_HEIGHT / STREAM_HEIGHT
+                        tx1 = THERMAL_DISPLAY_WIDTH - 1 - (vx2 * scale_x)
+                        tx2 = THERMAL_DISPLAY_WIDTH - 1 - (vx1 * scale_x)
+                        x1 = max(0, min(THERMAL_DISPLAY_WIDTH - 1, int(tx1)))
+                        y1 = max(0, min(THERMAL_DISPLAY_HEIGHT - 1, int(vy1 * scale_y)))
+                        x2 = max(0, min(THERMAL_DISPLAY_WIDTH - 1, int(tx2)))
+                        y2 = max(0, min(THERMAL_DISPLAY_HEIGHT - 1, int(vy2 * scale_y)))
                         cls_idx = d.get("class", -1)
                         label = labels[cls_idx] if 0 <= cls_idx < len(labels) else str(cls_idx)
                         cv2.rectangle(colored, (x1, y1), (x2, y2), (255, 140, 0), 2)
