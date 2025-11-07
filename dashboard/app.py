@@ -640,8 +640,55 @@ def initialize_thermal_if_available() -> None:
             time.sleep(1.0)  # Give I2C bus more time to stabilize
             
             print("[Thermal] Creating MLX90640 sensor instance...")
-            sensor = adafruit_mlx90640.MLX90640(i2c)
-            print("[Thermal] Sensor object created")
+            
+            # Try to create sensor, handle outlier pixels error
+            sensor = None
+            for init_retry in range(5):
+                try:
+                    sensor = adafruit_mlx90640.MLX90640(i2c)
+                    print("[Thermal] Sensor object created successfully")
+                    break
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "outlier pixels" in error_msg.lower():
+                        print(f"[Thermal] Outlier pixels detected on attempt {init_retry + 1}/5")
+                        if init_retry < 4:
+                            print("[Thermal] This is common with MLX90640, retrying with delay...")
+                            time.sleep(2.0 + init_retry)  # Progressive delay
+                            # Try to reset I2C
+                            try:
+                                i2c.deinit()
+                                time.sleep(1.0)
+                                i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+                                time.sleep(1.0)
+                            except:
+                                pass
+                        else:
+                            # Last attempt - try to continue anyway with warning
+                            print("[Thermal] WARNING: Outlier pixels persist. Sensor may have reduced accuracy.")
+                            print("[Thermal] Attempting to use sensor anyway...")
+                            try:
+                                # Force create sensor despite error by catching and ignoring
+                                sensor = adafruit_mlx90640.MLX90640(i2c)
+                            except:
+                                sensor = None
+                            break
+                    else:
+                        raise
+                except Exception as e:
+                    if init_retry < 4:
+                        print(f"[Thermal] Sensor creation attempt {init_retry + 1}/5 failed: {e}, retrying...")
+                        time.sleep(2.0)
+                    else:
+                        raise
+            
+            if sensor is None:
+                print("[Thermal] Failed to create sensor object")
+                i2c.deinit()
+                time.sleep(3.0)
+                continue
+            
+            print("[Thermal] Sensor object ready")
             
             # Try refresh rates from highest to lowest (want fastest that works)
             # MLX90640 supports: 0.5, 1, 2, 4, 8, 16, 32, 64 Hz
