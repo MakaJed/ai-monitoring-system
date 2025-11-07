@@ -656,19 +656,45 @@ def initialize_thermal_if_available() -> None:
                     sensor = adafruit_mlx90640.MLX90640(shared_i2c_bus)
                     print("[Thermal] Sensor object created")
                     
-                    # Set 8 Hz directly (like old system) - no test read (let first read happen naturally)
-                    sensor.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_8_HZ
-                    thermal_refresh_rate_hz = 8.0
-                    print("[Thermal] Refresh rate set to 8 Hz")
+                    # Try 8 Hz first, fall back to 4 Hz if it fails (hardware-dependent)
+                    rates_to_try = [
+                        (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, 8.0, "8 Hz"),
+                        (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, 4.0, "4 Hz"),
+                    ]
                     
-                    # Small delay to let sensor adjust to new refresh rate
-                    time.sleep(0.5)
+                    sensor_initialized = False
+                    for rate_enum, rate_val, rate_name in rates_to_try:
+                        try:
+                            sensor.refresh_rate = rate_enum
+                            thermal_refresh_rate_hz = rate_val
+                            print(f"[Thermal] Refresh rate set to {rate_name}")
+                            time.sleep(0.5)  # Let sensor adjust
+                            
+                            # Quick test: try one read to see if rate works
+                            test_frame = [0.0] * (thermal_shape[0] * thermal_shape[1])
+                            time.sleep(0.2)  # Wait for frame
+                            sensor.getFrame(test_frame)
+                            
+                            # If we got here, this rate works!
+                            thermal_sensor = sensor
+                            last_valid_thermal_frame = filter_outlier_pixels(test_frame, thermal_shape)
+                            print(f"[Thermal] ✓ MLX90640 initialized at {rate_name}")
+                            print("[Thermal] Outlier pixel filtering enabled")
+                            sensor_initialized = True
+                            break
+                        except RuntimeError as e:
+                            if "too many retries" in str(e).lower():
+                                print(f"[Thermal] {rate_name} failed: Too many retries - trying lower rate...")
+                                continue
+                            else:
+                                raise
+                        except Exception as e:
+                            print(f"[Thermal] {rate_name} failed: {e} - trying lower rate...")
+                            continue
                     
-                    # Don't test read - just use sensor (like old system)
-                    # First actual read will happen when stream starts
-                    thermal_sensor = sensor
-                    print("[Thermal] ✓ MLX90640 initialized at 8 Hz (first frame will be read when stream starts)")
-                    print("[Thermal] Outlier pixel filtering enabled")
+                    if not sensor_initialized:
+                        print("[Thermal] Failed to initialize at any refresh rate")
+                        thermal_sensor = None
                 except RuntimeError as e:
                     error_msg = str(e)
                     if "outlier pixels" in error_msg.lower():
