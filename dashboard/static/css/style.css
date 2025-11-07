@@ -34,7 +34,21 @@ html, body {
 }
 .title { font-weight: 700; }
 .subtitle { font-size: 12px; color: var(--muted); }
-.brand { display: flex; flex-direction: column; }
+.brand { 
+  display: flex; 
+  align-items: center; 
+  gap: 12px; 
+}
+.brand-logo {
+  height: 40px;
+  width: auto;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+.brand-text {
+  display: flex;
+  flex-direction: column;
+}
 
 .top-actions { display: flex; align-items: center; gap: 12px; }
 .btn {
@@ -177,6 +191,10 @@ html, body {
     margin-bottom: 8px;
   }
   
+  .brand-logo {
+    height: 32px;
+  }
+  
   .top-actions {
     width: 100%;
     flex-wrap: wrap;
@@ -238,6 +256,14 @@ html, body {
 @media (max-width: 480px) {
   .topbar {
     padding: 8px 10px;
+  }
+  
+  .brand-logo {
+    height: 28px;
+  }
+  
+  .brand {
+    gap: 8px;
   }
   
   .status-strip {
