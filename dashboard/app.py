@@ -643,11 +643,14 @@ def initialize_thermal_if_available() -> None:
             sensor = adafruit_mlx90640.MLX90640(i2c)
             print("[Thermal] Sensor object created")
             
-            # Try different refresh rates if 8Hz fails
+            # Try refresh rates from highest to lowest (want fastest that works)
+            # MLX90640 supports: 0.5, 1, 2, 4, 8, 16, 32, 64 Hz
+            # Higher = faster updates, but some sensors can't handle 16Hz+
             refresh_rates = [
-                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz"),
-                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz"),
+                (adafruit_mlx90640.RefreshRate.REFRESH_16_HZ, "16 Hz"),  # Fastest commonly supported
                 (adafruit_mlx90640.RefreshRate.REFRESH_8_HZ, "8 Hz"),
+                (adafruit_mlx90640.RefreshRate.REFRESH_4_HZ, "4 Hz"),
+                (adafruit_mlx90640.RefreshRate.REFRESH_2_HZ, "2 Hz"),
             ]
             
             sensor_working = False
