@@ -33,7 +33,7 @@ An edge-computing, automated surveillance solution combining computer vision, in
 
 | Environmental Analytics Chart | Mobile Interface |
 |---|---|
-| <img src="Hensightpics (2).jpg" width="350"> | <img src="img (1).png" width="350"> |
+| <img src="Hensightpics (2).jpg" width="350"> | <img src="Hensightpics (3).jpg" width="350"> |
 
 ---
 
