@@ -25,7 +25,7 @@ An edge-computing, automated surveillance solution combining computer vision, in
 
 | Hardware Enclosure Setup | Real-Time Testing & Monitoring |
 |---|---|
-| <img src="Hensightpics (2)_2.png" width="350"> | <img src="Hensightpics (1).jpg" width="350"> |
+| <img src="Hensightpics (2) 2.png" width="350"> | <img src="Hensightpics (1).jpg" width="350"> |
 
 | Web Dashboard (Live Camera & Thermal Feeds) | Historical Logs & Data Analytics |
 |---|---|
